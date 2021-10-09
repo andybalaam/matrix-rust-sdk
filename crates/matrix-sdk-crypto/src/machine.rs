@@ -52,6 +52,8 @@ use ruma::{
 use serde_json::Value;
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(feature = "backups_v1")]
+use crate::backups::BackupMachine;
 #[cfg(feature = "sled_cryptostore")]
 use crate::store::sled::SledStore;
 use crate::{
@@ -105,6 +107,9 @@ pub struct OlmMachine {
     /// State machine handling public user identities and devices, keeping track
     /// of when a key query needs to be done and handling one.
     identity_manager: IdentityManager,
+    /// A state machine that handles creating room key backups.
+    #[cfg(feature = "backups_v1")]
+    backup_machine: BackupMachine,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -181,6 +186,9 @@ impl OlmMachine {
         let identity_manager =
             IdentityManager::new(user_id.clone(), device_id.clone(), store.clone());
 
+        #[cfg(feature = "backups_v1")]
+        let backup_machine = BackupMachine::new(account.clone(), store.clone(), None);
+
         OlmMachine {
             user_id,
             device_id,
@@ -192,6 +200,8 @@ impl OlmMachine {
             verification_machine,
             key_request_machine,
             identity_manager,
+            #[cfg(feature = "backups_v1")]
+            backup_machine,
         }
     }
 
@@ -371,6 +381,10 @@ impl OlmMachine {
             }
             IncomingResponse::RoomMessage(_) => {
                 self.verification_machine.mark_request_as_sent(request_id);
+            }
+            IncomingResponse::KeysBackup(_) => {
+                #[cfg(feature = "backups_v1")]
+                self.backup_machine.mark_request_as_sent(*request_id).await?;
             }
         };
 
@@ -1499,6 +1513,12 @@ impl OlmMachine {
         }
 
         signatures
+    }
+
+    /// TODO
+    #[cfg(feature = "backups_v1")]
+    pub fn backup_machine(&self) -> &BackupMachine {
+        &self.backup_machine
     }
 }
 
