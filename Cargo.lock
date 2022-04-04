@@ -654,6 +654,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
+name = "combine"
+version = "4.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35ed6e9d84f0b51a7f52daf1c7d71dd136fd7a3f41a8462b8cdb8c78d920fad4"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "memchr",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util 0.7.3",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2324,6 +2338,7 @@ dependencies = [
  "matrix-sdk-base",
  "matrix-sdk-common",
  "matrix-sdk-indexeddb",
+ "matrix-sdk-redis",
  "matrix-sdk-sled",
  "matrix-sdk-test",
  "mime",
@@ -2602,6 +2617,27 @@ dependencies = [
  "ruma-common",
  "thiserror",
  "vodozemac",
+]
+
+[[package]]
+name = "matrix-sdk-redis"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "futures-core",
+ "futures-util",
+ "matrix-sdk-base",
+ "matrix-sdk-common",
+ "matrix-sdk-crypto",
+ "matrix-sdk-store-encryption",
+ "matrix-sdk-test",
+ "once_cell",
+ "redis",
+ "ruma",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3530,6 +3566,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis"
+version = "0.21.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "571c252c68d09a2ad3e49edd14e9ee48932f3e0f27b06b4ea4c9b2a706d31103"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "combine",
+ "futures-util",
+ "itoa 1.0.3",
+ "percent-encoding",
+ "pin-project-lite",
+ "ryu",
+ "sha1",
+ "tokio",
+ "tokio-util 0.7.3",
+ "url",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4054,6 +4110,21 @@ dependencies = [
  "cpufeatures",
  "digest 0.10.3",
 ]
+
+[[package]]
+name = "sha1"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1da05c97445caa12d05e848c4a4fcbbea29e748ac28f7e80e9b010392063770"
+dependencies = [
+ "sha1_smol",
+]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae1a47186c03a32177042e55dbc5fd5aee900b8e0069a8d70fba96a9375cd012"
 
 [[package]]
 name = "sha2"

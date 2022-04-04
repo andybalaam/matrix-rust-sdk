@@ -20,6 +20,7 @@ default = [
     "e2e-encryption",
     "sled",
     "native-tls",
+    "redis",
 ]
 
 e2e-encryption = [
@@ -31,6 +32,7 @@ js = ["matrix-sdk-common/js", "matrix-sdk-base/js"]
 
 sled = ["dep:matrix-sdk-sled", "matrix-sdk-sled?/state-store"]
 indexeddb = ["dep:matrix-sdk-indexeddb"]
+redis = ["dep:matrix-sdk-redis", "matrix-sdk-redis?/crypto-store"]
 
 qrcode = ["e2e-encryption", "matrix-sdk-base/qrcode"]
 markdown = ["ruma/markdown"]
@@ -50,6 +52,7 @@ sliding-sync = [
 docsrs = [
     "e2e-encryption",
     "sled",
+    "redis",
     "sso-login",
     "qrcode",
     "image-proc",
@@ -79,6 +82,7 @@ thiserror = "1.0.30"
 tracing = "0.1.34"
 url = "2.2.2"
 zeroize = "1.3.0"
+matrix-sdk-redis = { version = "0.1.0", path = "../matrix-sdk-redis", default-features = false, optional = true }
 
 # sliding sync
 derive_builder = "0.11.2"

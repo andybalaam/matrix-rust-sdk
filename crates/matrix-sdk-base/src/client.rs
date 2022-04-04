@@ -117,6 +117,13 @@ impl BaseClient {
         #[cfg(feature = "e2e-encryption")]
         let crypto_store =
             config.crypto_store.unwrap_or_else(|| Arc::new(MemoryCryptoStore::default()));
+        //let _redis_store: Option<Box<dyn CryptoStore>> = Some(Box::new(
+        //        matrix_sdk_crypto::store::RedisStore::open_with_database(
+        //            stores.1,
+        //            config.passphrase.as_deref().map(|p| p.as_str()),
+        //        )
+        //        .map_err(OlmError::Store)?,
+        //    ));
 
         BaseClient {
             store,
