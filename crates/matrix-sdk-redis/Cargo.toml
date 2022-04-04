@@ -1,0 +1,40 @@
+[package]
+name = "matrix-sdk-redis"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["encryption"]
+
+encryption = ["matrix-sdk-base/encryption", "matrix-sdk-crypto"]
+
+# TODO: remove unused dependencies
+
+[dependencies]
+futures-core = "0.3.15"
+futures-util = { version = "0.3.15", default-features = false }
+matrix-sdk-base = { path = "../matrix-sdk-base", features = ["store_key"] }
+matrix-sdk-common = { path = "../matrix-sdk-common" }
+matrix-sdk-crypto = { path = "../matrix-sdk-crypto", optional = true }
+matrix-sdk-store-encryption = { path = "../matrix-sdk-store-encryption" }
+async-stream = "0.3.2"
+regex = "1.5.4"
+redis = { version = "0.21", features = ["tokio-comp"] }
+serde = "1"
+serde_json = "1.0.64"
+thiserror = "1.0.25"
+tokio = { version = "1.7.1", default-features = false, features = ["sync", "fs"] }
+tracing = "0.1.26"
+anyhow = "1"
+dashmap = "5.1.0"
+
+[dev-dependencies]
+lazy_static = "1.4"
+tempfile = "3.2.0"
+matrix-sdk-test = { version = "0.4.0", path = "../matrix-sdk-test" }
+matrix-sdk-crypto = { path = "../matrix-sdk-crypto", features = ["testing"] }
+matrix-sdk-base = { path = "../matrix-sdk-base", features = ["testing"] }
+tokio = { version = "1.7.1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+] }

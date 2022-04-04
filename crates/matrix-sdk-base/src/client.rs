@@ -167,6 +167,14 @@ impl BaseClient {
         let store = config.state_store.map(Store::new).unwrap_or_else(Store::open_memory_store);
         #[cfg(feature = "e2e-encryption")]
         let holder = config.crypto_store.map(CryptoHolder::new).unwrap_or_default();
+        //let _redis_store: Option<Box<dyn CryptoStore>> = Some(Box::new(
+        //        matrix_sdk_crypto::store::RedisStore::open_with_database(
+        //            stores.1,
+        //            config.passphrase.as_deref().map(|p| p.as_str()),
+        //        )
+        //        .map_err(OlmError::Store)?,
+        //    ));
+
 
         BaseClient {
             session: store.session.clone(),
