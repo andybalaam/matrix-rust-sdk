@@ -468,7 +468,6 @@ impl RedisStore {
 
     async fn load_tracked_users(&self) -> Result<()> {
         let mut connection = self.client.get_async_connection().await.unwrap();
-        // TODO: transaction?
         // TODO: unwrap
         let tracked_users: HashMap<String, bool> =
             connection.hgetall(&format!("{}tracked_users", self.key_prefix)).await.unwrap();
@@ -571,47 +570,37 @@ impl RedisStore {
         //#[cfg(feature = "backups_v1")]
         //let backup_version = changes.backup_version;
 
-        // TODO: wrap in a Redis transaction
+        // Wrap in a Redis transaction
+        let mut pipeline = redis::pipe();
+        pipeline.atomic();
 
         if let Some(a) = &account_pickle {
-            let _: String = connection
-                .set(
-                    format!("{}account", self.key_prefix),
-                    serde_json::to_vec(a).unwrap(), // TODO unwrap
-                )
-                .await
-                .unwrap(); // TODO: unwrap
+            pipeline.set(
+                format!("{}account", self.key_prefix),
+                serde_json::to_vec(a).unwrap(), // TODO unwrap
+            ).ignore();
         }
 
         if let Some(i) = &private_identity_pickle {
             let redis_key = format!("{}private_identity", self.key_prefix);
-            let _: () =
-                connection.set(redis_key, serde_json::to_string(&i).unwrap()).await.unwrap();
-            // TODO: unwrap
+            pipeline.set(redis_key, serde_json::to_string(&i).unwrap()).ignore();
         }
 
         for (key, sessions) in &session_changes {
             let redis_key = format!("{}sessions|{}", self.key_prefix, key);
-
-            let _: () =
-                connection.set(redis_key, serde_json::to_string(sessions).unwrap()).await.unwrap();
-            // TODO: unwrap
+            pipeline.set(redis_key, serde_json::to_string(sessions).unwrap()).ignore();
         }
 
         for (key, inbound_group_sessions) in &inbound_session_changes {
             let redis_key = format!("{}inbound_group_sessions|{}", self.key_prefix, key);
 
-            let _: () = connection
-                .set(redis_key, serde_json::to_string(inbound_group_sessions).unwrap())
-                .await
-                .unwrap();
+            pipeline.set(redis_key, serde_json::to_string(inbound_group_sessions).unwrap()).ignore();
             // TODO: unwrap
         }
 
         let redis_key = format!("{}olm_hashes", self.key_prefix);
         for hash in &olm_hashes {
-            let _: () =
-                connection.sadd(&redis_key, serde_json::to_string(hash).unwrap()).await.unwrap();
+            pipeline.sadd(&redis_key, serde_json::to_string(hash).unwrap()).ignore();
             // TODO unwrap
         }
 
@@ -623,27 +612,20 @@ impl RedisStore {
 
             let secret_requests_by_info_key =
                 format!("{}secret_requests_by_info|{}", self.key_prefix, key_request.info.redis_key());
-            let _: () = connection
-                .set(secret_requests_by_info_key, key_request.request_id.redis_key())
-                .await
-                .unwrap();
-            // TODO: unwrap
+            pipeline.set(secret_requests_by_info_key, key_request.request_id.redis_key()).ignore();
 
             let outgoing_secret_requests_key =
                 format!("{}outgoing_secret_requests|{}", self.key_prefix, key_request_id);
             if key_request.sent_out {
-                let _: () = connection.hdel(&unsent_secret_requests_key, key_request_id).await.unwrap();
-                let _: () = connection
-                    .set(outgoing_secret_requests_key, serde_json::to_string(&key_request).unwrap())
-                    .await
-                    .unwrap();
+                pipeline.hdel(&unsent_secret_requests_key, key_request_id).ignore();
+                pipeline.set(
+                    outgoing_secret_requests_key, serde_json::to_string(&key_request).unwrap()).ignore();
                 // TODO: unwraps
             } else {
-                let _: () = connection.del(outgoing_secret_requests_key).await.unwrap();
-                let _: () = connection
-                    .hset(&unsent_secret_requests_key, key_request_id, serde_json::to_string(&key_request).unwrap())
-                    .await
-                    .unwrap();
+                pipeline.del(outgoing_secret_requests_key);
+                pipeline.hset(
+                    &unsent_secret_requests_key, key_request_id, serde_json::to_string(&key_request).unwrap()
+                ).ignore();
                 // TODO: unwraps
             }
         }
@@ -651,74 +633,30 @@ impl RedisStore {
         for device in device_changes.new.iter().chain(&device_changes.changed) {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
 
-            let _: () = connection
-                .hset(
-                    redis_key,
-                    device.device_id().as_str(),
-                    serde_json::to_string(device).unwrap(),
-                )
-                .await
-                .unwrap();
+            pipeline.hset(
+                redis_key,
+                device.device_id().as_str(),
+                serde_json::to_string(device).unwrap(),
+            ).ignore();
             // TODO: unwrap
         }
 
         for device in device_changes.deleted {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
-            let _: () = connection.hdel(redis_key, device.device_id().as_str()).await.unwrap();
-            // TODO: unwrap
+            pipeline.hdel(redis_key, device.device_id().as_str()).ignore();
         }
 
         for identity in identity_changes.changed.iter().chain(&identity_changes.new) {
             let redis_key = format!("{}identities|{}", self.key_prefix, identity.user_id());
 
-            let _: () =
-                connection.set(redis_key, serde_json::to_string(identity).unwrap()).await.unwrap();
+            pipeline.set(redis_key, serde_json::to_string(identity).unwrap()).ignore();
             // TODO: unwrap
         }
 
-        //        let ret: Result<(), TransactionError<serde_json::Error>> = (
-        //            &self.account,
-        //            &self.private_identity,
-        //            &self.devices,
-        //            &self.identities,
-        //            &self.sessions,
-        //            &self.inbound_group_sessions,
-        //            &self.outbound_group_sessions,
-        //            &self.olm_hashes,
-        //            &self.outgoing_secret_requests,
-        //            &self.unsent_secret_requests,
-        //            &self.secret_requests_by_info,
-        //        )
-        //            .transaction(
-        //                |(
-        //                    account,
-        //                    private_identity,
-        //                    devices,
-        //                    identities,
-        //                    sessions,
-        //                    inbound_sessions,
-        //                    outbound_sessions,
-        //                    hashes,
-        //                    outgoing_secret_requests,
-        //                    unsent_secret_requests,
-        //                    secret_requests_by_info,
-        //                )| {
-        //                    if let Some(a) = &account_pickle {
-        //                        account.insert(
-        //                            "account".encode(),
-        //
-        // serde_json::to_vec(a).map_err(ConflictableTransactionError::Abort)?,
-        //                        )?;
-        //                    }
-        //
-        //                    if let Some(i) = &private_identity_pickle {
-        //                        private_identity.insert(
-        //                            "identity".encode(),
-        //
-        // serde_json::to_vec(&i).map_err(ConflictableTransactionError::Abort)?,
-        //                        )?;
-        //                    }
-        //
+        let _: () = pipeline.query_async(&mut connection).await.unwrap();
+        // TODO: unwrap
+
+        // TODO: is this untested?
         //                    #[cfg(feature = "backups_v1")]
         //                    if let Some(r) = &recovery_key_pickle {
         //                        account.insert(
@@ -737,44 +675,6 @@ impl RedisStore {
         //                        )?;
         //                    }
         //
-        //                    for device in
-        // device_changes.new.iter().chain(&device_changes.changed) {
-        //                        let key = device.encode();
-        //                        let device = serde_json::to_vec(&device)
-        //                            .map_err(ConflictableTransactionError::Abort)?;
-        //                        devices.insert(key, device)?;
-        //                    }
-        //
-        //                    for device in &device_changes.deleted {
-        //                        let key = device.encode();
-        //                        devices.remove(key)?;
-        //                    }
-        //
-        //                    for identity in
-        // identity_changes.changed.iter().chain(&identity_changes.new) {
-        //                        identities.insert(
-        //                            identity.user_id().encode(),
-        //                            serde_json::to_vec(&identity)
-        //
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // )?;                    }
-        //
-        //                    for (key, session) in &session_changes {
-        //                        sessions.insert(
-        //                            key.as_slice(),
-        //                            serde_json::to_vec(&session)
-        //
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // )?;                    }
-        //
-        //                    for (key, session) in &inbound_session_changes {
-        //                        inbound_sessions.insert(
-        //                            key.as_slice(),
-        //                            serde_json::to_vec(&session)
-        //
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // )?;                    }
-        //
         //                    for (key, session) in &outbound_session_changes {
         //                        outbound_sessions.insert(
         //                            key.encode(),
@@ -782,46 +682,6 @@ impl RedisStore {
         //
         // .map_err(ConflictableTransactionError::Abort)?,
         // )?;                    }
-        //
-        //                    for hash in &olm_hashes {
-        //                        hashes.insert(
-        //                            serde_json::to_vec(&hash)
-        //
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // &[0],                        )?;
-        //                    }
-        //
-        //                    for key_request in &key_requests {
-        //                        secret_requests_by_info.insert(
-        //                            (&key_request.info).encode(),
-        //                            key_request.request_id.encode(),
-        //                        )?;
-        //
-        //                        let key_request_id = key_request.request_id.encode();
-        //
-        //                        if key_request.sent_out {
-        //
-        // unsent_secret_requests.remove(key_request_id.clone())?;
-        // outgoing_secret_requests.insert(
-        // key_request_id,
-        // serde_json::to_vec(&key_request)
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // )?;                        } else {
-        //
-        // outgoing_secret_requests.remove(key_request_id.clone())?;
-        // unsent_secret_requests.insert(
-        // key_request_id,
-        // serde_json::to_vec(&key_request)
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // )?;                        }
-        //                    }
-        //
-        //                    Ok(())
-        //                },
-        //            );
-        //
-        //        ret?;
-        //        self.inner.flush_async().await?;
 
         Ok(())
     }
@@ -1151,50 +1011,29 @@ impl CryptoStore for RedisStore {
     }
 
     async fn delete_outgoing_secret_requests(&self, request_id: &TransactionId) -> Result<()> {
-        // TODO: redis transaction
-        // TODO: unwraps
         let mut connection = self.client.get_async_connection().await.unwrap();
         let okr_req_id_key = format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id.redis_key());
         let sent_request: Option<String> = connection.get(&okr_req_id_key).await.unwrap();
+
+        // Wrap the deletes in a Redis transaction
+        // TODO: race: if someone updates sent_request before we delete it, we
+        // could be deleting the old stuff, when others are using a newer version,
+        // so we would be in an inconsistent state where the sent_request is deleted,
+        // but the things it refers to still exist.
+        let mut pipeline = redis::pipe();
+        pipeline.atomic();
         if let Some(sent_request) = sent_request {
-            let _: () = connection.del(&okr_req_id_key).await.unwrap();
+            pipeline.del(&okr_req_id_key).ignore();
             let usr_key = format!("{}unsent_secret_requests", self.key_prefix);
-            let _: () = connection.hdel(&usr_key, request_id.redis_key()).await.unwrap();
+            pipeline.hdel(&usr_key, request_id.redis_key()).ignore();
             let sent_request: GossipRequest = serde_json::from_str(&sent_request).unwrap();
             let srbi_info_key = format!("{}secret_requests_by_info|{}", self.key_prefix, sent_request.info.redis_key());
-            let _: () = connection.del(&srbi_info_key).await.unwrap();
+            pipeline.del(&srbi_info_key).ignore();
         }
-        Ok(())
+        let _: () = pipeline.query_async(&mut connection).await.unwrap();
+        // TODO: unwrap
 
-        //                    let sent_request: Option<GossipRequest> = outgoing_key_requests.remove(request_id.encode())?
-        //                        .map(|r|
-        //                            serde_json::from_slice(&r)).transpose()
-        //                        .map_err(ConflictableTransactionError::Abort)?;
-        //
-        //                    let unsent_request: Option<GossipRequest> =
-        // unsent_key_requests
-        // .remove(request_id.encode())?                        .map(|r|
-        // serde_json::from_slice(&r))                        .transpose()
-        //                        .map_err(ConflictableTransactionError::Abort)?;
-        //
-        //                    if let Some(request) = sent_request {
-        //
-        // key_requests_by_info.remove((&request.info).encode())?;
-        // }
-        //
-        //                    if let Some(request) = unsent_request {
-        //
-        // key_requests_by_info.remove((&request.info).encode())?;
-        // }
-        //
-        //                    Ok(())
-        //                },
-        //            );
-        //
-        //        ret?;
-        //        self.inner.flush_async().await?;
-        //
-        //        Ok(())
+        Ok(())
     }
 
     async fn load_backup_keys(&self) -> Result<BackupKeys> {
