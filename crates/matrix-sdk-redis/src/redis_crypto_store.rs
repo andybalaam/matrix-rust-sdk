@@ -22,7 +22,26 @@ use std::{
 };
 
 use dashmap::DashSet;
-use matrix_sdk_common::{async_trait, locks::Mutex};
+use matrix_sdk_common::{
+    async_trait,
+    locks::Mutex,
+    ruma::{
+        events::{room_key_request::RequestedKeyInfo, secret::request::SecretName},
+        DeviceId, RoomId, TransactionId, UserId,
+    },
+};
+//use tracing::debug;
+use matrix_sdk_crypto::{
+    olm::{
+        IdentityKeys, InboundGroupSession, OutboundGroupSession, PickledInboundGroupSession,
+        PickledSession, PrivateCrossSigningIdentity, Session,
+    },
+    store::{
+        caches::SessionStore, BackupKeys, Changes, CryptoStore, CryptoStoreError, PickleKey,
+        Result, RoomKeyCounts,
+    },
+    GossipRequest, LocalTrust, ReadOnlyAccount, ReadOnlyDevice, ReadOnlyUserIdentities, SecretInfo,
+};
 // vdmc use olm_rs::{account::IdentityKeys, PicklingMode};
 //use serde::{Deserialize, Serialize};
 //pub use sled::Error;
@@ -31,27 +50,6 @@ use matrix_sdk_common::{async_trait, locks::Mutex};
 //    Config, Db, IVec, Transactional, Tree,
 //};
 use redis::{aio::Connection, AsyncCommands, Client, RedisError};
-
-use matrix_sdk_common::ruma::{
-    events::{room_key_request::RequestedKeyInfo, secret::request::SecretName},
-    DeviceId, RoomId, TransactionId, UserId,
-};
-
-//use tracing::debug;
-use matrix_sdk_crypto::{store::{
-    caches::SessionStore, BackupKeys, Changes, CryptoStore, CryptoStoreError,
-    PickleKey, Result, RoomKeyCounts,
-}, olm::{IdentityKeys, Session, InboundGroupSession}, ReadOnlyAccount};
-
-use matrix_sdk_crypto::{
-    GossipRequest, SecretInfo,
-    ReadOnlyDevice, ReadOnlyUserIdentities,
-    olm::{
-        OutboundGroupSession, PickledInboundGroupSession, PickledSession,
-        PrivateCrossSigningIdentity,
-    },
-    LocalTrust,
-};
 //use crate::olm::PrivateCrossSigningIdentity;
 
 /// This needs to be 32 bytes long since AES-GCM requires it, otherwise we will
@@ -511,20 +509,13 @@ impl RedisStore {
     //    }
 
     async fn save_changes(&self, changes: Changes) -> Result<()> {
-
         let mut connection = self.client.get_async_connection().await.unwrap();
 
-        let account_pickle = if let Some(a) = changes.account {
-            Some(a.pickle().await)
-        } else {
-            None
-        };
+        let account_pickle =
+            if let Some(a) = changes.account { Some(a.pickle().await) } else { None };
 
-        let private_identity_pickle = if let Some(i) = changes.private_identity {
-            Some(i.pickle().await?)
-        } else {
-            None
-        };
+        let private_identity_pickle =
+            if let Some(i) = changes.private_identity { Some(i.pickle().await?) } else { None };
 
         //#[cfg(feature = "backups_v1")]
         //let recovery_key_pickle = changes.recovery_key.map(|r|
@@ -575,10 +566,12 @@ impl RedisStore {
         pipeline.atomic();
 
         if let Some(a) = &account_pickle {
-            pipeline.set(
-                format!("{}account", self.key_prefix),
-                serde_json::to_vec(a).unwrap(), // TODO unwrap
-            ).ignore();
+            pipeline
+                .set(
+                    format!("{}account", self.key_prefix),
+                    serde_json::to_vec(a).unwrap(), // TODO unwrap
+                )
+                .ignore();
         }
 
         if let Some(i) = &private_identity_pickle {
@@ -591,10 +584,11 @@ impl RedisStore {
             pipeline.set(redis_key, serde_json::to_string(sessions).unwrap()).ignore();
         }
 
+        let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         for (key, inbound_group_sessions) in &inbound_session_changes {
-            let redis_key = format!("{}inbound_group_sessions|{}", self.key_prefix, key);
-
-            pipeline.set(redis_key, serde_json::to_string(inbound_group_sessions).unwrap()).ignore();
+            pipeline
+                .hset(&redis_key, key, serde_json::to_string(inbound_group_sessions).unwrap())
+                .ignore();
             // TODO: unwrap
         }
 
@@ -604,28 +598,35 @@ impl RedisStore {
             // TODO unwrap
         }
 
-        let unsent_secret_requests_key =
-            format!("{}unsent_secret_requests", self.key_prefix);
+        let unsent_secret_requests_key = format!("{}unsent_secret_requests", self.key_prefix);
 
         for key_request in &key_requests {
             let key_request_id = key_request.request_id.redis_key();
 
-            let secret_requests_by_info_key =
-                format!("{}secret_requests_by_info|{}", self.key_prefix, key_request.info.redis_key());
+            let secret_requests_by_info_key = format!(
+                "{}secret_requests_by_info|{}",
+                self.key_prefix,
+                key_request.info.redis_key()
+            );
             pipeline.set(secret_requests_by_info_key, key_request.request_id.redis_key()).ignore();
 
             let outgoing_secret_requests_key =
                 format!("{}outgoing_secret_requests|{}", self.key_prefix, key_request_id);
             if key_request.sent_out {
                 pipeline.hdel(&unsent_secret_requests_key, key_request_id).ignore();
-                pipeline.set(
-                    outgoing_secret_requests_key, serde_json::to_string(&key_request).unwrap()).ignore();
+                pipeline
+                    .set(outgoing_secret_requests_key, serde_json::to_string(&key_request).unwrap())
+                    .ignore();
                 // TODO: unwraps
             } else {
                 pipeline.del(outgoing_secret_requests_key);
-                pipeline.hset(
-                    &unsent_secret_requests_key, key_request_id, serde_json::to_string(&key_request).unwrap()
-                ).ignore();
+                pipeline
+                    .hset(
+                        &unsent_secret_requests_key,
+                        key_request_id,
+                        serde_json::to_string(&key_request).unwrap(),
+                    )
+                    .ignore();
                 // TODO: unwraps
             }
         }
@@ -633,11 +634,13 @@ impl RedisStore {
         for device in device_changes.new.iter().chain(&device_changes.changed) {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
 
-            pipeline.hset(
-                redis_key,
-                device.device_id().as_str(),
-                serde_json::to_string(device).unwrap(),
-            ).ignore();
+            pipeline
+                .hset(
+                    redis_key,
+                    device.device_id().as_str(),
+                    serde_json::to_string(device).unwrap(),
+                )
+                .ignore();
             // TODO: unwrap
         }
 
@@ -686,7 +689,10 @@ impl RedisStore {
         Ok(())
     }
 
-    async fn get_outgoing_key_request_helper(&self, request_id: &str) -> Result<Option<GossipRequest>> {
+    async fn get_outgoing_key_request_helper(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<GossipRequest>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id);
         let req_string: Option<String> = connection.get(redis_key).await.unwrap();
@@ -804,10 +810,10 @@ impl CryptoStore for RedisStore {
         sender_key: &str,
         session_id: &str,
     ) -> Result<Option<InboundGroupSession>> {
-        let session_redis_key = format!("{}|{}|{}", room_id.as_str(), sender_key, session_id);
-        let key = format!("{}inbound_group_sessions|{}", self.key_prefix, session_redis_key);
+        let key = format!("{}|{}|{}", room_id.as_str(), sender_key, session_id);
+        let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         let mut connection = self.client.get_async_connection().await.unwrap(); // TODO: unwrap
-        let pickle_str: String = connection.get(key).await.unwrap();
+        let pickle_str: String = connection.hget(redis_key, key).await.unwrap();
         let pickle = serde_json::from_str(&pickle_str).unwrap();
         // TODO: unwraps
 
@@ -971,7 +977,10 @@ impl CryptoStore for RedisStore {
         // TODO: unwrap
     }
 
-    async fn is_message_known(&self, message_hash: &matrix_sdk_crypto::olm::OlmMessageHash) -> Result<bool> {
+    async fn is_message_known(
+        &self,
+        message_hash: &matrix_sdk_crypto::olm::OlmMessageHash,
+    ) -> Result<bool> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}olm_hashes", self.key_prefix);
         Ok(connection
@@ -993,7 +1002,8 @@ impl CryptoStore for RedisStore {
         key_info: &SecretInfo,
     ) -> Result<Option<GossipRequest>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
-        let redis_key = format!("{}secret_requests_by_info|{}", self.key_prefix, key_info.redis_key());
+        let redis_key =
+            format!("{}secret_requests_by_info|{}", self.key_prefix, key_info.redis_key());
         let id: Option<String> = connection.get(redis_key).await.unwrap();
 
         if let Some(id) = id {
@@ -1012,7 +1022,8 @@ impl CryptoStore for RedisStore {
 
     async fn delete_outgoing_secret_requests(&self, request_id: &TransactionId) -> Result<()> {
         let mut connection = self.client.get_async_connection().await.unwrap();
-        let okr_req_id_key = format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id.redis_key());
+        let okr_req_id_key =
+            format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id.redis_key());
         let sent_request: Option<String> = connection.get(&okr_req_id_key).await.unwrap();
 
         // Wrap the deletes in a Redis transaction
@@ -1027,7 +1038,11 @@ impl CryptoStore for RedisStore {
             let usr_key = format!("{}unsent_secret_requests", self.key_prefix);
             pipeline.hdel(&usr_key, request_id.redis_key()).ignore();
             let sent_request: GossipRequest = serde_json::from_str(&sent_request).unwrap();
-            let srbi_info_key = format!("{}secret_requests_by_info|{}", self.key_prefix, sent_request.info.redis_key());
+            let srbi_info_key = format!(
+                "{}secret_requests_by_info|{}",
+                self.key_prefix,
+                sent_request.info.redis_key()
+            );
             pipeline.del(&srbi_info_key).ignore();
         }
         let _: () = pipeline.query_async(&mut connection).await.unwrap();
@@ -1066,8 +1081,13 @@ impl CryptoStore for RedisStore {
 
 #[cfg(test)]
 mod test {
-    use matrix_sdk_base::ruma::{user_id, room_id, EventEncryptionAlgorithm};
-    use matrix_sdk_crypto::{testing::{get_device, get_own_identity, get_other_identity}, types::SignedKey, store::{DeviceChanges, IdentityChanges}, olm::OlmMessageHash};
+    use matrix_sdk_base::ruma::{room_id, user_id, EventEncryptionAlgorithm};
+    use matrix_sdk_crypto::{
+        olm::OlmMessageHash,
+        store::{DeviceChanges, IdentityChanges},
+        testing::{get_device, get_other_identity, get_own_identity},
+        types::SignedKey,
+    };
     //    use std::collections::BTreeMap;
     //
     //    use matrix_sdk_common::uuid::Uuid;
@@ -1120,7 +1140,7 @@ mod test {
         "ALICEDEVICE".into()
     }
 
-    fn bob_id() -> &'static UserId{
+    fn bob_id() -> &'static UserId {
         user_id!("@bob:example.org")
     }
 
@@ -1157,8 +1177,7 @@ mod test {
         bob.generate_one_time_keys_helper(1).await;
         let one_time_key = bob.one_time_keys().await.iter().next().unwrap().1.to_owned();
         let sender_key = bob.identity_keys().curve25519.to_owned();
-        let session =
-            alice.create_outbound_session_helper(sender_key, one_time_key, false).await;
+        let session = alice.create_outbound_session_helper(sender_key, one_time_key, false).await;
 
         (alice, session)
     }
@@ -1238,8 +1257,11 @@ mod test {
 
         store.save_changes(changes).await.unwrap();
 
-        let sessions =
-            store.get_sessions(&session.sender_key.to_base64()).await.expect("Can't load sessions").unwrap();
+        let sessions = store
+            .get_sessions(&session.sender_key.to_base64())
+            .await
+            .expect("Can't load sessions")
+            .unwrap();
         let loaded_session = sessions.lock().await.get(0).cloned().unwrap();
 
         assert_eq!(&session, &loaded_session);
@@ -1606,3 +1628,21 @@ mod test {
         assert!(store.get_unsent_secret_requests().await.unwrap().is_empty());
     }
 }
+
+/*
+#[cfg(test)]
+mod test {
+    use matrix_sdk_crypto::cryptostore_integration_tests;
+
+    use super::RedisStore;
+
+    async fn get_store(name: String, passphrase: Option<&str>) -> RedisStore {
+        let redis_url = "redis://127.0.0.1/";
+        let store = RedisStore::open(redis_url, passphrase, name).await
+            .expect("Can't create a Redis store");
+
+        store
+    }
+
+    cryptostore_integration_tests! { integration }
+}*/

@@ -175,7 +175,6 @@ impl BaseClient {
         //        .map_err(OlmError::Store)?,
         //    ));
 
-
         BaseClient {
             session: store.session.clone(),
             sync_token: store.sync_token.clone(),
