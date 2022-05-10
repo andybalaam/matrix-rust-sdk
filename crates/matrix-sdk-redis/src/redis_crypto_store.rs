@@ -21,14 +21,14 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use async_trait::async_trait;
 use dashmap::DashSet;
-use matrix_sdk_common::{
-    async_trait,
-    locks::Mutex,
-    ruma::{
-        events::{room_key_request::RequestedKeyInfo, secret::request::SecretName},
-        DeviceId, RoomId, TransactionId, UserId,
-    },
+use matrix_sdk_common::locks::Mutex;
+
+use matrix_sdk_store_encryption::StoreCipher;
+use ruma::{
+    events::{room_key_request::RequestedKeyInfo, secret::request::SecretName},
+    DeviceId, OwnedDeviceId, OwnedUserId, RoomId, TransactionId, UserId,
 };
 //use tracing::debug;
 use matrix_sdk_crypto::{
@@ -50,6 +50,7 @@ use matrix_sdk_crypto::{
 //    Config, Db, IVec, Transactional, Tree,
 //};
 use redis::{aio::Connection, AsyncCommands, Client, RedisError};
+use serde::{Deserialize, Serialize};
 //use crate::olm::PrivateCrossSigningIdentity;
 
 /// This needs to be 32 bytes long since AES-GCM requires it, otherwise we will
@@ -143,20 +144,23 @@ pub struct AccountInfo {
     identity_keys: Arc<IdentityKeys>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct TrackedUser {
+    user_id: OwnedUserId,
+    dirty: bool,
+}
+
 /// A store that holds its information in a Redis database
 #[derive(Clone)]
 pub struct RedisStore {
-    redis_url: String,
     key_prefix: String,
     client: Client,
     account_info: Arc<RwLock<Option<AccountInfo>>>,
-    //    path: Option<PathBuf>,
-    //    inner: Db,
-    pickle_key: Arc<PickleKey>,
+    store_cipher: Option<Arc<StoreCipher>>,
 
     session_cache: SessionStore,
-    tracked_users_cache: Arc<DashSet<Box<UserId>>>,
-    users_for_key_query_cache: Arc<DashSet<Box<UserId>>>,
+    tracked_users_cache: Arc<DashSet<OwnedUserId>>,
+    users_for_key_query_cache: Arc<DashSet<OwnedUserId>>,
     /*    account: Tree,
      *    private_identity: Tree,
      *
@@ -178,7 +182,7 @@ pub struct RedisStore {
 impl std::fmt::Debug for RedisStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisStore")
-            .field("redis_url", &self.redis_url)
+            .field("redis_url", &self.client.get_connection_info().redis)
             .field("key_prefix", &self.key_prefix)
             .finish()
     }
@@ -197,34 +201,36 @@ impl RedisStore {
     #[allow(dead_code)]
     /// Open the Redis-based cryptostore at the given URL using the given
     /// passphrase to encrypt private data.
-    pub async fn open_with_passphrase(redis_url: &str, passphrase: Option<&str>) -> Result<Self> {
-        Self::open(redis_url, passphrase, String::from("matrix-sdk-crypto|")).await
+    pub async fn open_with_passphrase(client: Client, passphrase: Option<&str>) -> Result<Self> {
+        Self::open(client, passphrase, String::from("matrix-sdk-crypto|")).await
     }
 
     /// Open the Redis-based cryptostore at the given URL using the given
     /// passphrase to encrypt private data and assuming all Redis keys are
     /// prefixed with the given string.
     pub async fn open(
-        redis_url: &str,
+        client: Client,
         passphrase: Option<&str>,
         key_prefix: String,
     ) -> Result<Self> {
         // TODO: allow supplying an additional prefix for your Redis keys
-        let client = Client::open(redis_url).unwrap(); // TODO: unwrap
         let mut connection = client.get_async_connection().await.unwrap();
 
-        let pickle_key = if let Some(passphrase) = passphrase {
-            Self::get_or_create_pickle_key(passphrase, &key_prefix, &mut connection).await?
+        let store_cipher = if let Some(passphrase) = passphrase {
+            Some(
+                Self::get_or_create_store_cipher(passphrase, &key_prefix, &mut connection)
+                    .await?
+                    .into(),
+            )
         } else {
-            PickleKey::try_from(DEFAULT_PICKLE.as_bytes().to_vec())
-                .expect("Can't create default pickle key")
+            None
         };
+
         Ok(Self {
-            redis_url: String::from(redis_url),
             key_prefix,
             client,
             account_info: RwLock::new(None).into(),
-            pickle_key: pickle_key.into(),
+            store_cipher,
             session_cache: SessionStore::new(),
             tracked_users_cache: Arc::new(DashSet::new()),
             users_for_key_query_cache: Arc::new(DashSet::new()),
@@ -239,6 +245,25 @@ impl RedisStore {
 
     fn get_account_info(&self) -> Option<AccountInfo> {
         self.account_info.read().unwrap().clone()
+    }
+
+    fn serialize_value(&self, event: &impl Serialize) -> Result<Vec<u8>, CryptoStoreError> {
+        if let Some(key) = &self.store_cipher {
+            key.encrypt_value(event).map_err(|e| CryptoStoreError::Backend(Box::new(e)))
+        } else {
+            Ok(serde_json::to_vec(event)?)
+        }
+    }
+
+    fn deserialize_value<T: for<'b> Deserialize<'b>>(
+        &self,
+        event: &[u8],
+    ) -> Result<T, CryptoStoreError> {
+        if let Some(key) = &self.store_cipher {
+            key.decrypt_value(event).map_err(|e| CryptoStoreError::Backend(Box::new(e)))
+        } else {
+            Ok(serde_json::from_slice(event)?)
+        }
     }
 
     //    async fn reset_backup_state(&self) -> Result<()> {
@@ -435,49 +460,42 @@ impl RedisStore {
     //        Ok(database)
     //    }
 
-    async fn get_or_create_pickle_key(
+    async fn get_or_create_store_cipher(
         passphrase: &str,
         key_prefix: &str,
         connection: &mut Connection,
-    ) -> Result<PickleKey> {
+    ) -> Result<StoreCipher> {
         // TODO: unwraps
-        let key_db_entry: Option<String> =
-            connection.get(String::from(key_prefix) + "pickle_key").await.unwrap();
-
-        if let Some(key_db_entry) = key_db_entry {
-            let key_json = serde_json::from_str(&key_db_entry).unwrap();
-            let key = PickleKey::from_encrypted(passphrase, key_json)
-                .map_err(|_| CryptoStoreError::UnpicklingError)?;
-            Ok(key)
+        let key_id = format!("{}{}", key_prefix, "store_cipher");
+        let key_db_entry: Option<String> = connection.get(&key_id).await.unwrap();
+        let key = if let Some(key_db_entry) = key_db_entry {
+            let key_json: Vec<u8> = serde_json::from_str(&key_db_entry).unwrap();
+            StoreCipher::import(passphrase, &key_json)
+                .map_err(|_| CryptoStoreError::UnpicklingError)?
         } else {
-            let key = PickleKey::new();
-            let encrypted = key.encrypt(passphrase);
-            let _: () = connection
-                .set(String::from(key_prefix) + "pickle_key", serde_json::to_string(&encrypted)?)
-                .await
-                .unwrap();
-            Ok(key)
-        }
-    }
+            let key = StoreCipher::new().map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
+            let encrypted =
+                key.export(passphrase).map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
+            let _: () = connection.set(&key_id, encrypted).await.unwrap();
+            key
+        };
 
-    fn get_pickle_key(&self) -> &[u8] {
-        self.pickle_key.key()
+        Ok(key)
     }
 
     async fn load_tracked_users(&self) -> Result<()> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         // TODO: unwrap
-        let tracked_users: HashMap<String, bool> =
+        let tracked_users: HashMap<String, Vec<u8>> =
             connection.hgetall(&format!("{}tracked_users", self.key_prefix)).await.unwrap();
 
-        for value in tracked_users.iter() {
-            let (user, dirty) = value;
-            let user = UserId::parse(user.clone())?;
+        for (_, user) in tracked_users {
+            let user: TrackedUser = self.deserialize_value(&user)?;
 
-            self.tracked_users_cache.insert(user.clone());
+            self.tracked_users_cache.insert(user.user_id.to_owned());
 
-            if *dirty {
-                self.users_for_key_query_cache.insert(user);
+            if user.dirty {
+                self.users_for_key_query_cache.insert(user.user_id);
             }
         }
 
@@ -509,10 +527,18 @@ impl RedisStore {
     //    }
 
     async fn save_changes(&self, changes: Changes) -> Result<()> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let account_pickle = if let Some(account) = changes.account {
+            let account_info = AccountInfo {
+                user_id: account.user_id.clone(),
+                device_id: account.device_id.clone(),
+                identity_keys: account.identity_keys.clone(),
+            };
 
-        let account_pickle =
-            if let Some(a) = changes.account { Some(a.pickle().await) } else { None };
+            *self.account_info.write().unwrap() = Some(account_info);
+            Some(account.pickle().await)
+        } else {
+            None
+        };
 
         let private_identity_pickle =
             if let Some(i) = changes.private_identity { Some(i.pickle().await?) } else { None };
@@ -560,6 +586,8 @@ impl RedisStore {
         let key_requests = changes.key_requests;
         //#[cfg(feature = "backups_v1")]
         //let backup_version = changes.backup_version;
+
+        let mut connection = self.client.get_async_connection().await.unwrap();
 
         // Wrap in a Redis transaction
         let mut pipeline = redis::pipe();
@@ -710,6 +738,41 @@ impl RedisStore {
 
         Ok(request)
     }
+
+    /// Save a batch of tracked users.
+    ///
+    /// # Arguments
+    ///
+    /// * `tracked_users` - A list of tuples. The first element of the tuple is
+    /// the user ID, the second element is if the user should be considered to
+    /// be dirty.
+    pub async fn save_tracked_users(
+        &self,
+        tracked_users: &[(&UserId, bool)],
+    ) -> Result<(), CryptoStoreError> {
+        let mut connection = self.client.get_async_connection().await.unwrap();
+
+        let users: Vec<TrackedUser> = tracked_users
+            .iter()
+            .map(|(u, d)| TrackedUser { user_id: (*u).into(), dirty: *d })
+            .collect();
+
+        // TODO: transaction?
+        // TODO: unwrap
+
+        for user in users {
+            let _: () = connection
+                .hset(
+                    format!("{}tracked_users", self.key_prefix),
+                    user.user_id.as_str(),
+                    self.serialize_value(&user).unwrap(),
+                )
+                .await
+                .unwrap(); // TODO: unwrap
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -741,17 +804,7 @@ impl CryptoStore for RedisStore {
     }
 
     async fn save_account(&self, account: ReadOnlyAccount) -> Result<()> {
-        let account_info = AccountInfo {
-            user_id: account.user_id.clone(),
-            device_id: account.device_id.clone(),
-            identity_keys: account.identity_keys.clone(),
-        };
-
-        *self.account_info.write().unwrap() = Some(account_info);
-
-        let changes = Changes { account: Some(account), ..Default::default() };
-
-        self.save_changes(changes).await
+        self.save_changes(Changes { account: Some(account), ..Default::default() }).await
     }
 
     async fn load_identity(&self) -> Result<Option<PrivateCrossSigningIdentity>> {
@@ -826,69 +879,66 @@ impl CryptoStore for RedisStore {
     }
 
     async fn get_inbound_group_sessions(&self) -> Result<Vec<InboundGroupSession>> {
-        //        let pickles: Result<Vec<PickledInboundGroupSession>> = self
-        //            .inbound_group_sessions
-        //            .iter()
-        //            .map(|p|
-        // serde_json::from_slice(&p?.1).map_err(CryptoStoreError::Serialization))
-        //            .collect();
-        //
-        //        Ok(pickles?
-        //            .into_iter()
-        //            .filter_map(|p| InboundGroupSession::from_pickle(p,
-        // self.get_pickle_mode()).ok())            .collect())
-        Ok(Vec::new())
+        let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
+        // TODO: unwraps
+        let mut connection = self.client.get_async_connection().await.unwrap();
+        let igss: Vec<String> = connection.hvals(redis_key).await.unwrap();
+
+        let pickles: Result<Vec<PickledInboundGroupSession>> = igss
+            .iter()
+            .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
+            .collect();
+
+        Ok(pickles?.into_iter().filter_map(|p| InboundGroupSession::from_pickle(p).ok()).collect())
     }
 
     async fn inbound_group_session_counts(&self) -> Result<RoomKeyCounts> {
-        //        let pickles: Vec<PickledInboundGroupSession> = self
-        //            .inbound_group_sessions
-        //            .iter()
-        //            .map(|p| {
-        //                let item = p?;
-        //
-        // serde_json::from_slice(&item.1).map_err(CryptoStoreError::Serialization)
-        //            })
-        //            .collect::<Result<_>>()?;
-        //
-        //        let total = pickles.len();
-        //        let backed_up = pickles.into_iter().filter(|p| p.backed_up).count();
-        //
-        //        Ok(RoomKeyCounts { total, backed_up })
-        Ok(RoomKeyCounts { total: 0, backed_up: 0 })
+        let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
+        // TODO: unwraps
+        let mut connection = self.client.get_async_connection().await.unwrap();
+        let igss: Vec<String> = connection.hvals(redis_key).await.unwrap();
+
+        let pickles: Result<Vec<PickledInboundGroupSession>> = igss
+            .iter()
+            .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
+            .collect();
+
+        // TODO: unwraps if JSON didn't parse
+        let pickles = pickles.unwrap();
+
+        let total = pickles.len();
+        let backed_up = pickles.into_iter().filter(|p| p.backed_up).count();
+
+        Ok(RoomKeyCounts { total, backed_up })
     }
 
     async fn inbound_group_sessions_for_backup(
         &self,
         limit: usize,
     ) -> Result<Vec<InboundGroupSession>> {
-        //        let pickles: Vec<InboundGroupSession> = self
-        //            .inbound_group_sessions
-        //            .iter()
-        //            .map(|p| {
-        //                let item = p?;
-        //
-        // serde_json::from_slice(&item.1).map_err(CryptoStoreError::from)
-        //            })
-        //            .filter_map(|p: Result<PickledInboundGroupSession,
-        // CryptoStoreError>| match p {                Ok(p) => {
-        //                    if !p.backed_up {
-        //                        Some(
-        //                            InboundGroupSession::from_pickle(p,
-        // self.get_pickle_mode())
-        // .map_err(CryptoStoreError::from),                        )
-        //                    } else {
-        //                        None
-        //                    }
-        //                }
-        //
-        //                Err(p) => Some(Err(p)),
-        //            })
-        //            .take(limit)
-        //            .collect::<Result<_>>()?;
-        //
-        //        Ok(pickles)
-        Ok(Vec::new())
+        let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
+        // TODO: unwraps
+        let mut connection = self.client.get_async_connection().await.unwrap();
+        let igss: Vec<String> = connection.hvals(redis_key).await.unwrap();
+
+        let pickles = igss
+            .iter()
+            .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
+            .filter_map(|p: Result<PickledInboundGroupSession, CryptoStoreError>| match p {
+                Ok(p) => {
+                    if !p.backed_up {
+                        Some(InboundGroupSession::from_pickle(p).map_err(CryptoStoreError::from))
+                    } else {
+                        None
+                    }
+                }
+
+                Err(p) => Some(Err(p)),
+            })
+            .take(limit)
+            .collect::<Result<_>>()?;
+
+        Ok(pickles)
     }
 
     async fn reset_backup_state(&self) -> Result<()> {
@@ -912,11 +962,11 @@ impl CryptoStore for RedisStore {
         !self.users_for_key_query_cache.is_empty()
     }
 
-    fn users_for_key_query(&self) -> HashSet<Box<UserId>> {
+    fn users_for_key_query(&self) -> HashSet<OwnedUserId> {
         self.users_for_key_query_cache.iter().map(|u| u.clone()).collect()
     }
 
-    fn tracked_users(&self) -> HashSet<Box<UserId>> {
+    fn tracked_users(&self) -> HashSet<OwnedUserId> {
         self.tracked_users_cache.to_owned().iter().map(|u| u.clone()).collect()
     }
 
@@ -929,11 +979,7 @@ impl CryptoStore for RedisStore {
             self.users_for_key_query_cache.remove(user);
         }
 
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        let _: () = connection
-            .hset(format!("{}tracked_users", self.key_prefix), user.as_str(), dirty)
-            .await
-            .unwrap(); // TODO: unwrap
+        self.save_tracked_users(&[(user, dirty)]).await?;
 
         Ok(already_added)
     }
@@ -952,7 +998,7 @@ impl CryptoStore for RedisStore {
     async fn get_user_devices(
         &self,
         user_id: &UserId,
-    ) -> Result<HashMap<Box<DeviceId>, ReadOnlyDevice>> {
+    ) -> Result<HashMap<OwnedDeviceId, ReadOnlyDevice>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let user_device: HashMap<String, String> =
             connection.hgetall(&format!("{}devices|{}", self.key_prefix, user_id)).await.unwrap();
@@ -1081,13 +1127,13 @@ impl CryptoStore for RedisStore {
 
 #[cfg(test)]
 mod test {
-    use matrix_sdk_base::ruma::{room_id, user_id, EventEncryptionAlgorithm};
     use matrix_sdk_crypto::{
         olm::OlmMessageHash,
         store::{DeviceChanges, IdentityChanges},
         testing::{get_device, get_other_identity, get_own_identity},
         types::SignedKey,
     };
+    use ruma::{room_id, user_id, EventEncryptionAlgorithm};
     //    use std::collections::BTreeMap;
     //
     //    use matrix_sdk_common::uuid::Uuid;
@@ -1153,7 +1199,8 @@ mod test {
     async fn create_test_store(passphrase: Option<&str>, test_name: String) -> RedisStore {
         // TODO: uses a real local Redis
         let key_prefix = format!("matrix-sdk-crypto|test|{}|", test_name);
-        RedisStore::open(REDIS_URL, passphrase, key_prefix)
+        let client = Client::open(REDIS_URL).unwrap(); // TODO: unwrap
+        RedisStore::open(client, passphrase, key_prefix)
             .await
             .expect("Can't create a passphrase protected store")
     }
@@ -1187,8 +1234,8 @@ mod test {
         // Assume a Redis exists on localhost
         clear_redis("redis://127.0.0.1/").await;
         let redis_url = "redis://127.0.0.1/";
-        let _ =
-            RedisStore::open_with_passphrase(redis_url, None).await.expect("Can't create store");
+        let client = Client::open(redis_url).unwrap();
+        let _ = RedisStore::open_with_passphrase(client, None).await.expect("Can't create store");
     }
 
     #[async_test]
@@ -1329,7 +1376,7 @@ mod test {
 
         export.forwarding_curve25519_key_chain = vec!["some_chain".to_owned()];
 
-        let session = InboundGroupSession::from_export(export).unwrap();
+        let session = InboundGroupSession::from_export(export);
 
         let changes =
             Changes { inbound_group_sessions: vec![session.clone()], ..Default::default() };
@@ -1629,20 +1676,37 @@ mod test {
     }
 }
 
-/*
 #[cfg(test)]
-mod test {
+mod test2 {
     use matrix_sdk_crypto::cryptostore_integration_tests;
+    use once_cell::sync::Lazy;
+    use redis::{AsyncCommands, Client, Commands};
 
     use super::RedisStore;
 
+    static REDIS_URL: &str = "redis://127.0.0.1/";
+
+    // We pretend to use this as our shared client, so that
+    // we clear Redis the first time we access it, but actually
+    // we clone it each time we use it, so they are independent.
+    static REDIS_CLIENT: Lazy<Client> = Lazy::new(|| {
+        let client = Client::open(REDIS_URL).unwrap();
+        let mut connection = client.get_connection().unwrap();
+        let keys: Vec<String> = connection.keys("matrix-sdk-crypto|test|*").unwrap();
+        for k in keys {
+            let _: () = connection.del(k).unwrap();
+        }
+        client
+    });
+
     async fn get_store(name: String, passphrase: Option<&str>) -> RedisStore {
-        let redis_url = "redis://127.0.0.1/";
-        let store = RedisStore::open(redis_url, passphrase, name).await
+        let key_prefix = format!("matrix-sdk-crypto|test|{}|", name);
+        let store = RedisStore::open(REDIS_CLIENT.clone(), passphrase, key_prefix)
+            .await
             .expect("Can't create a Redis store");
 
         store
     }
 
     cryptostore_integration_tests! { integration }
-}*/
+}

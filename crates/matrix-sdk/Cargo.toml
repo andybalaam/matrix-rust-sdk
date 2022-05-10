@@ -31,7 +31,7 @@ e2e-encryption = [
 
 sled = ["matrix-sdk-sled/state-store"]
 indexeddb = ["matrix-sdk-indexeddb"]
-redis-crypto-store = ["matrix-sdk-redis/encryption", "encryption"]
+redis-crypto-store = ["matrix-sdk-redis/e2e-encryption", "e2e-encryption"]
 
 qrcode = ["e2e-encryption", "matrix-sdk-base/qrcode"]
 markdown = ["ruma/markdown"]
