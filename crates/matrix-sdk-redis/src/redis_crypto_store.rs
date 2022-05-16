@@ -501,30 +501,31 @@ impl RedisStore {
 
         Ok(())
     }
-    //
-    //    async fn load_outbound_group_session(
-    //        &self,
-    //        room_id: &RoomId,
-    //    ) -> Result<Option<OutboundGroupSession>> {
-    //        let account_info =
-    // self.get_account_info().ok_or(CryptoStoreError::AccountUnset)?;
-    //
-    //        self.outbound_group_sessions
-    //            .get(room_id.encode())?
-    //            .map(|p|
-    // serde_json::from_slice(&p).map_err(CryptoStoreError::Serialization))
-    //            .transpose()?
-    //            .map(|p| {
-    //                OutboundGroupSession::from_pickle(
-    //                    account_info.device_id,
-    //                    account_info.identity_keys,
-    //                    p,
-    //                    self.get_pickle_mode(),
-    //                )
-    //                .map_err(CryptoStoreError::OlmGroupSession)
-    //            })
-    //            .transpose()
-    //    }
+
+    async fn load_outbound_group_session(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<OutboundGroupSession>> {
+        let account_info = self.get_account_info().ok_or(CryptoStoreError::AccountUnset)?;
+
+        let mut connection = self.client.get_async_connection().await.unwrap();
+        // TODO: unwrap
+
+        let redis_key = format!("{}outbound_session_changes", self.key_prefix);
+        let session: Option<String> = connection.hget(redis_key, room_id.as_str()).await.unwrap();
+
+        Ok(session
+            .map(|s: String| serde_json::from_str(&s).map_err(CryptoStoreError::Serialization))
+            .transpose()?
+            .map(|p| {
+                OutboundGroupSession::from_pickle(
+                    account_info.device_id,
+                    account_info.identity_keys,
+                    p,
+                )
+                .unwrap()
+            }))
+    }
 
     async fn save_changes(&self, changes: Changes) -> Result<()> {
         let account_pickle = if let Some(account) = changes.account {
@@ -571,15 +572,13 @@ impl RedisStore {
             inbound_session_changes.insert(key, pickle);
         }
 
-        //let mut outbound_session_changes = HashMap::new();
+        let mut outbound_session_changes = HashMap::new();
 
-        //for session in changes.outbound_group_sessions {
-        //    let room_id = session.room_id();
-        //    let pickle = session.pickle(self.get_pickle_mode()).await;
-
-        //    outbound_session_changes.insert(room_id.clone(), pickle);
-        //}
-        // TODO: is this untested?
+        for session in changes.outbound_group_sessions {
+            let room_id = session.room_id().to_owned();
+            let pickle = session.pickle().await;
+            outbound_session_changes.insert(room_id.clone(), pickle);
+        }
 
         let identity_changes = changes.identities;
         let olm_hashes = changes.message_hashes;
@@ -616,6 +615,18 @@ impl RedisStore {
         for (key, inbound_group_sessions) in &inbound_session_changes {
             pipeline
                 .hset(&redis_key, key, serde_json::to_string(inbound_group_sessions).unwrap())
+                .ignore();
+            // TODO: unwrap
+        }
+
+        let redis_key = format!("{}outbound_session_changes", self.key_prefix);
+        for (key, outbound_group_sessions) in &outbound_session_changes {
+            pipeline
+                .hset(
+                    &redis_key,
+                    key.as_str(),
+                    serde_json::to_string(outbound_group_sessions).unwrap(),
+                )
                 .ignore();
             // TODO: unwrap
         }
@@ -705,14 +716,6 @@ impl RedisStore {
         // serde_json::to_vec(b).map_err(ConflictableTransactionError::Abort)?,
         //                        )?;
         //                    }
-        //
-        //                    for (key, session) in &outbound_session_changes {
-        //                        outbound_sessions.insert(
-        //                            key.encode(),
-        //                            serde_json::to_vec(&session)
-        //
-        // .map_err(ConflictableTransactionError::Abort)?,
-        // )?;                    }
 
         Ok(())
     }
@@ -950,8 +953,7 @@ impl CryptoStore for RedisStore {
         &self,
         room_id: &RoomId,
     ) -> Result<Option<OutboundGroupSession>> {
-        //        self.load_outbound_group_session(room_id).await
-        Ok(None)
+        self.load_outbound_group_session(room_id).await
     }
 
     fn is_user_tracked(&self, user_id: &UserId) -> bool {
