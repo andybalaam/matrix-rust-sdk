@@ -266,44 +266,35 @@ impl RedisStore {
         }
     }
 
-    //    async fn reset_backup_state(&self) -> Result<()> {
-    //        let mut pickles: Vec<(IVec, PickledInboundGroupSession)> = self
-    //            .inbound_group_sessions
-    //            .iter()
-    //            .map(|p| {
-    //                let item = p?;
-    //                Ok((
-    //                    item.0,
-    //
-    // serde_json::from_slice(&item.1).map_err(CryptoStoreError::Serialization)?,
-    //                ))
-    //            })
-    //            .collect::<Result<_>>()?;
-    //
-    //        for (_, pickle) in &mut pickles {
-    //            pickle.backed_up = false;
-    //        }
-    //
-    //        let ret: Result<(), TransactionError<serde_json::Error>> =
-    //            self.inbound_group_sessions.transaction(|inbound_sessions| {
-    //                for (key, pickle) in &pickles {
-    //                    inbound_sessions.insert(
-    //                        key,
-    //
-    // serde_json::to_vec(&pickle).map_err(ConflictableTransactionError::Abort)?,
-    //                    )?;
-    //                }
-    //
-    //                Ok(())
-    //            });
-    //
-    //        ret?;
-    //
-    //        self.inner.flush_async().await?;
-    //
-    //        Ok(())
-    //    }
-    //
+    async fn reset_backup_state(&self) -> Result<()> {
+        let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
+        let mut connection = self.client.get_async_connection().await.unwrap(); // TODO: unwrap
+
+        // Read out all the sessions, set them as not backed up
+        let sessions: Vec<(String, String)> = connection.hgetall(&redis_key).await.unwrap();
+        let pickles: Vec<(String, PickledInboundGroupSession)> = sessions
+            .into_iter()
+            .map(|(k, s)| {
+                let mut pickle: PickledInboundGroupSession = serde_json::from_str(&s).unwrap();
+                pickle.backed_up = false;
+                (k, pickle)
+            })
+            .collect();
+
+        // Write them back out in a transaction
+        let mut pipeline = redis::pipe();
+        pipeline.atomic();
+
+        for (k, pickle) in pickles {
+            pipeline.hset(&redis_key, k, serde_json::to_string(&pickle).unwrap()).ignore();
+            // TODO: unwrap
+        }
+
+        let _: () = pipeline.query_async(&mut connection).await.unwrap();
+
+        Ok(())
+    }
+
     //    fn upgrade(&self) -> Result<()> {
     //        let version = self
     //            .inner
@@ -945,8 +936,7 @@ impl CryptoStore for RedisStore {
     }
 
     async fn reset_backup_state(&self) -> Result<()> {
-        //        self.reset_backup_state().await
-        Ok(())
+        self.reset_backup_state().await
     }
 
     async fn get_outbound_group_sessions(
