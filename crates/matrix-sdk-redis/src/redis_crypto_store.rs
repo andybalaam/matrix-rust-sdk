@@ -38,7 +38,7 @@ use matrix_sdk_crypto::{
     },
     store::{
         caches::SessionStore, BackupKeys, Changes, CryptoStore, CryptoStoreError, PickleKey,
-        Result, RoomKeyCounts,
+        RecoveryKey, Result, RoomKeyCounts,
     },
     GossipRequest, LocalTrust, ReadOnlyAccount, ReadOnlyDevice, ReadOnlyUserIdentities, SecretInfo,
 };
@@ -535,10 +535,7 @@ impl RedisStore {
         let private_identity_pickle =
             if let Some(i) = changes.private_identity { Some(i.pickle().await?) } else { None };
 
-        //#[cfg(feature = "backups_v1")]
-        //let recovery_key_pickle = changes.recovery_key.map(|r|
-        // r.pickle(self.get_pickle_key())); TODO: missing test for recovery
-        // keys???
+        let recovery_key_pickle = changes.recovery_key;
 
         let device_changes = changes.devices;
         let mut session_changes: HashMap<String, Vec<PickledSession>> = HashMap::new();
@@ -574,8 +571,7 @@ impl RedisStore {
         let identity_changes = changes.identities;
         let olm_hashes = changes.message_hashes;
         let key_requests = changes.key_requests;
-        //#[cfg(feature = "backups_v1")]
-        //let backup_version = changes.backup_version;
+        let backup_version = changes.backup_version;
 
         let mut connection = self.client.get_async_connection().await.unwrap();
 
@@ -686,27 +682,18 @@ impl RedisStore {
             // TODO: unwrap
         }
 
+        if let Some(r) = &recovery_key_pickle {
+            let redis_key = format!("{}recovery_key_v1", self.key_prefix);
+            pipeline.set(redis_key, self.serialize_value(r).unwrap());
+        }
+
+        if let Some(r) = &backup_version {
+            let redis_key = format!("{}backup_version_v1", self.key_prefix);
+            pipeline.set(redis_key, self.serialize_value(r).unwrap());
+        }
+
         let _: () = pipeline.query_async(&mut connection).await.unwrap();
         // TODO: unwrap
-
-        // TODO: is this untested?
-        //                    #[cfg(feature = "backups_v1")]
-        //                    if let Some(r) = &recovery_key_pickle {
-        //                        account.insert(
-        //                            "recovery_key_v1".encode(),
-        //
-        // serde_json::to_vec(r).map_err(ConflictableTransactionError::Abort)?,
-        //                        )?;
-        //                    }
-        //
-        //                    #[cfg(feature = "backups_v1")]
-        //                    if let Some(b) = &backup_version {
-        //                        account.insert(
-        //                            "backup_version_v1".encode(),
-        //
-        // serde_json::to_vec(b).map_err(ConflictableTransactionError::Abort)?,
-        //                        )?;
-        //                    }
 
         Ok(())
     }
@@ -1090,30 +1077,19 @@ impl CryptoStore for RedisStore {
     }
 
     async fn load_backup_keys(&self) -> Result<BackupKeys> {
-        //        let version = self
-        //            .account
-        //            .get("backup_version_v1".encode())?
-        //            .map(|v| serde_json::from_slice(&v))
-        //            .transpose()?;
-        //
-        //        #[cfg(feature = "backups_v1")]
-        //        let recovery_key = {
-        //            self.account
-        //                .get("recovery_key_v1".encode())?
-        //                .map(|p| serde_json::from_slice(&p))
-        //                .transpose()?
-        //                .map(|p| {
-        //                    crate::backups::RecoveryKey::from_pickle(p,
-        // self.get_pickle_key())                        .map_err(|_|
-        // CryptoStoreError::UnpicklingError)                })
-        //                .transpose()?
-        //        };
-        //
-        //        #[cfg(not(feature = "backups_v1"))]
-        //        let recovery_key = None;
-        //
-        //        Ok(BackupKeys { backup_version: version, recovery_key })
-        todo!()
+        let mut connection = self.client.get_async_connection().await.unwrap();
+        let redis_key = format!("{}backup_version_v1", self.key_prefix);
+        // TODO: unwrap
+        let version_v: Option<Vec<u8>> = connection.get(&redis_key).await.unwrap();
+        let version = version_v.map(|v| self.deserialize_value(&v).unwrap());
+
+        let redis_key = format!("{}recovery_key_v1", self.key_prefix);
+        // TODO: unwrap
+        let recovery_key_str: Option<Vec<u8>> = connection.get(&redis_key).await.unwrap();
+        let recovery_key: Option<RecoveryKey> =
+            recovery_key_str.map(|s| self.deserialize_value(&s).unwrap());
+
+        Ok(BackupKeys { backup_version: version, recovery_key })
     }
 }
 
