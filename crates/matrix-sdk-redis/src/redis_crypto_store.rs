@@ -1128,6 +1128,7 @@ mod test_fake_redis {
     cryptostore_integration_tests! { integration }
 }
 
+#[cfg(feature = "real-redis-tests")]
 #[cfg(test)]
 mod test_real_redis {
     use matrix_sdk_crypto::cryptostore_integration_tests;

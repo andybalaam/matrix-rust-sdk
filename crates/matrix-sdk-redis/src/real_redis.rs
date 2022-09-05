@@ -66,6 +66,7 @@ pub struct RealRedisClient {
 }
 
 impl RealRedisClient {
+    #[cfg(feature = "real-redis-tests")]
     #[cfg(test)]
     pub fn from(client: redis::Client) -> Self {
         Self { client }

@@ -10,7 +10,7 @@ e2e-encryption = [
     "matrix-sdk-crypto",
     "matrix-sdk-base/e2e-encryption",
 ]
-#test-real-redis = []
+real-redis-tests = []
 
 # TODO: remove unused dependencies
 [dependencies]
