@@ -15,6 +15,7 @@
 #![allow(unused)] // TODO
 
 use std::{
+    any::Any,
     collections::{BTreeMap, HashMap, HashSet},
     convert::{TryFrom, TryInto},
     path::{Path, PathBuf},
@@ -23,6 +24,7 @@ use std::{
 
 use async_trait::async_trait;
 use dashmap::DashSet;
+use futures_util::FutureExt;
 use matrix_sdk_common::locks::Mutex;
 //use tracing::debug;
 use matrix_sdk_crypto::{
@@ -44,12 +46,17 @@ use matrix_sdk_store_encryption::StoreCipher;
 //    transaction::{ConflictableTransactionError, TransactionError},
 //    Config, Db, IVec, Transactional, Tree,
 //};
-use redis::{aio::Connection, AsyncCommands, Client, RedisError};
+use redis::{
+    aio::Connection, AsyncCommands, Client, ConnectionInfo, FromRedisValue, RedisConnectionInfo,
+    RedisError, RedisFuture, RedisResult, ToRedisArgs,
+};
 use ruma::{
     events::{room_key_request::RequestedKeyInfo, secret::request::SecretName},
     DeviceId, OwnedDeviceId, OwnedUserId, RoomId, TransactionId, UserId,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::redis_shim::{RedisClientShim, RedisConnectionShim};
 //use crate::olm::PrivateCrossSigningIdentity;
 
 /// This needs to be 32 bytes long since AES-GCM requires it, otherwise we will
@@ -151,9 +158,12 @@ struct TrackedUser {
 
 /// A store that holds its information in a Redis database
 #[derive(Clone)]
-pub struct RedisStore {
+pub struct RedisStore<C>
+where
+    C: RedisClientShim,
+{
     key_prefix: String,
-    client: Client,
+    client: C,
     account_info: Arc<RwLock<Option<AccountInfo>>>,
     store_cipher: Option<Arc<StoreCipher>>,
 
@@ -178,7 +188,10 @@ pub struct RedisStore {
      *    tracked_users: Tree, */
 }
 
-impl std::fmt::Debug for RedisStore {
+impl<C> std::fmt::Debug for RedisStore<C>
+where
+    C: RedisClientShim,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisStore")
             .field("redis_url", &self.client.get_connection_info().redis)
@@ -196,22 +209,21 @@ impl std::fmt::Debug for RedisStore {
 //    }
 //}
 
-impl RedisStore {
+impl<C> RedisStore<C>
+where
+    C: RedisClientShim,
+{
     #[allow(dead_code)]
     /// Open the Redis-based cryptostore at the given URL using the given
     /// passphrase to encrypt private data.
-    pub async fn open_with_passphrase(client: Client, passphrase: Option<&str>) -> Result<Self> {
+    pub async fn open_with_passphrase(client: C, passphrase: Option<&str>) -> Result<Self> {
         Self::open(client, passphrase, String::from("matrix-sdk-crypto|")).await
     }
 
     /// Open the Redis-based cryptostore at the given URL using the given
     /// passphrase to encrypt private data and assuming all Redis keys are
     /// prefixed with the given string.
-    pub async fn open(
-        client: Client,
-        passphrase: Option<&str>,
-        key_prefix: String,
-    ) -> Result<Self> {
+    pub async fn open(client: C, passphrase: Option<&str>, key_prefix: String) -> Result<Self> {
         // TODO: allow supplying an additional prefix for your Redis keys
         let mut connection = client.get_async_connection().await.unwrap();
 
@@ -281,15 +293,14 @@ impl RedisStore {
             .collect();
 
         // Write them back out in a transaction
-        let mut pipeline = redis::pipe();
-        pipeline.atomic();
+        let mut pipeline = self.client.create_pipe();
 
         for (k, pickle) in pickles {
-            pipeline.hset(&redis_key, k, serde_json::to_string(&pickle).unwrap()).ignore();
+            pipeline.hset(&redis_key, &k, serde_json::to_string(&pickle).unwrap());
             // TODO: unwrap
         }
 
-        let _: () = pipeline.query_async(&mut connection).await.unwrap();
+        pipeline.query_async(&mut connection).await.unwrap();
 
         Ok(())
     }
@@ -450,11 +461,14 @@ impl RedisStore {
     //        Ok(database)
     //    }
 
-    async fn get_or_create_store_cipher(
+    async fn get_or_create_store_cipher<Conn>(
         passphrase: &str,
         key_prefix: &str,
-        connection: &mut Connection,
-    ) -> Result<StoreCipher> {
+        connection: &mut Conn,
+    ) -> Result<StoreCipher>
+    where
+        Conn: RedisConnectionShim,
+    {
         // TODO: unwraps
         let key_id = format!("{}{}", key_prefix, "store_cipher");
         let key_db_entry: Option<String> = connection.get(&key_id).await.unwrap();
@@ -502,7 +516,7 @@ impl RedisStore {
         // TODO: unwrap
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
-        let session: Option<String> = connection.hget(redis_key, room_id.as_str()).await.unwrap();
+        let session: Option<String> = connection.hget(&redis_key, room_id.as_str()).await.unwrap();
 
         Ok(session
             .map(|s: String| serde_json::from_str(&s).map_err(CryptoStoreError::Serialization))
@@ -575,51 +589,44 @@ impl RedisStore {
         let mut connection = self.client.get_async_connection().await.unwrap();
 
         // Wrap in a Redis transaction
-        let mut pipeline = redis::pipe();
-        pipeline.atomic();
+        let mut pipeline = self.client.create_pipe();
 
         if let Some(a) = &account_pickle {
-            pipeline
-                .set(
-                    format!("{}account", self.key_prefix),
-                    serde_json::to_vec(a).unwrap(), // TODO unwrap
-                )
-                .ignore();
+            pipeline.set_vec(
+                &format!("{}account", self.key_prefix),
+                serde_json::to_vec(a).unwrap(), // TODO unwrap
+            );
         }
 
         if let Some(i) = &private_identity_pickle {
             let redis_key = format!("{}private_identity", self.key_prefix);
-            pipeline.set(redis_key, serde_json::to_string(&i).unwrap()).ignore();
+            pipeline.set(&redis_key, serde_json::to_string(&i).unwrap());
         }
 
         for (key, sessions) in &session_changes {
             let redis_key = format!("{}sessions|{}", self.key_prefix, key);
-            pipeline.set(redis_key, serde_json::to_string(sessions).unwrap()).ignore();
+            pipeline.set(&redis_key, serde_json::to_string(sessions).unwrap());
         }
 
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         for (key, inbound_group_sessions) in &inbound_session_changes {
-            pipeline
-                .hset(&redis_key, key, serde_json::to_string(inbound_group_sessions).unwrap())
-                .ignore();
+            pipeline.hset(&redis_key, key, serde_json::to_string(inbound_group_sessions).unwrap());
             // TODO: unwrap
         }
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
         for (key, outbound_group_sessions) in &outbound_session_changes {
-            pipeline
-                .hset(
-                    &redis_key,
-                    key.as_str(),
-                    serde_json::to_string(outbound_group_sessions).unwrap(),
-                )
-                .ignore();
+            pipeline.hset(
+                &redis_key,
+                key.as_str(),
+                serde_json::to_string(outbound_group_sessions).unwrap(),
+            );
             // TODO: unwrap
         }
 
         let redis_key = format!("{}olm_hashes", self.key_prefix);
         for hash in &olm_hashes {
-            pipeline.sadd(&redis_key, serde_json::to_string(hash).unwrap()).ignore();
+            pipeline.sadd(&redis_key, serde_json::to_string(hash).unwrap());
             // TODO unwrap
         }
 
@@ -633,25 +640,24 @@ impl RedisStore {
                 self.key_prefix,
                 key_request.info.redis_key()
             );
-            pipeline.set(secret_requests_by_info_key, key_request.request_id.redis_key()).ignore();
+            pipeline.set(&secret_requests_by_info_key, key_request.request_id.redis_key());
 
             let outgoing_secret_requests_key =
                 format!("{}outgoing_secret_requests|{}", self.key_prefix, key_request_id);
             if key_request.sent_out {
-                pipeline.hdel(&unsent_secret_requests_key, key_request_id).ignore();
-                pipeline
-                    .set(outgoing_secret_requests_key, serde_json::to_string(&key_request).unwrap())
-                    .ignore();
+                pipeline.hdel(&unsent_secret_requests_key, &key_request_id);
+                pipeline.set(
+                    &outgoing_secret_requests_key,
+                    serde_json::to_string(&key_request).unwrap(),
+                );
                 // TODO: unwraps
             } else {
-                pipeline.del(outgoing_secret_requests_key);
-                pipeline
-                    .hset(
-                        &unsent_secret_requests_key,
-                        key_request_id,
-                        serde_json::to_string(&key_request).unwrap(),
-                    )
-                    .ignore();
+                pipeline.del(&outgoing_secret_requests_key);
+                pipeline.hset(
+                    &unsent_secret_requests_key,
+                    &key_request_id,
+                    serde_json::to_string(&key_request).unwrap(),
+                );
                 // TODO: unwraps
             }
         }
@@ -659,39 +665,37 @@ impl RedisStore {
         for device in device_changes.new.iter().chain(&device_changes.changed) {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
 
-            pipeline
-                .hset(
-                    redis_key,
-                    device.device_id().as_str(),
-                    serde_json::to_string(device).unwrap(),
-                )
-                .ignore();
+            pipeline.hset(
+                &redis_key,
+                device.device_id().as_str(),
+                serde_json::to_string(device).unwrap(),
+            );
             // TODO: unwrap
         }
 
         for device in device_changes.deleted {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
-            pipeline.hdel(redis_key, device.device_id().as_str()).ignore();
+            pipeline.hdel(&redis_key, device.device_id().as_str());
         }
 
         for identity in identity_changes.changed.iter().chain(&identity_changes.new) {
             let redis_key = format!("{}identities|{}", self.key_prefix, identity.user_id());
 
-            pipeline.set(redis_key, serde_json::to_string(identity).unwrap()).ignore();
+            pipeline.set(&redis_key, serde_json::to_string(identity).unwrap());
             // TODO: unwrap
         }
 
         if let Some(r) = &recovery_key_pickle {
             let redis_key = format!("{}recovery_key_v1", self.key_prefix);
-            pipeline.set(redis_key, self.serialize_value(r).unwrap());
+            pipeline.set_vec(&redis_key, self.serialize_value(r).unwrap());
         }
 
         if let Some(r) = &backup_version {
             let redis_key = format!("{}backup_version_v1", self.key_prefix);
-            pipeline.set(redis_key, self.serialize_value(r).unwrap());
+            pipeline.set_vec(&redis_key, self.serialize_value(r).unwrap());
         }
 
-        let _: () = pipeline.query_async(&mut connection).await.unwrap();
+        pipeline.query_async(&mut connection).await.unwrap();
         // TODO: unwrap
 
         Ok(())
@@ -703,13 +707,13 @@ impl RedisStore {
     ) -> Result<Option<GossipRequest>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id);
-        let req_string: Option<String> = connection.get(redis_key).await.unwrap();
+        let req_string: Option<String> = connection.get(&redis_key).await.unwrap();
         let request = req_string.map(|req_string| serde_json::from_str(&req_string).unwrap());
         // TODO: unwraps
 
         let request = if request.is_none() {
             let redis_key = format!("{}unsent_secret_requests", self.key_prefix);
-            let req_string: Option<String> = connection.hget(redis_key, request_id).await.unwrap();
+            let req_string: Option<String> = connection.hget(&redis_key, request_id).await.unwrap();
             req_string.map(|req_string| serde_json::from_str(&req_string).unwrap())
             // TODO: unwraps
         } else {
@@ -743,7 +747,7 @@ impl RedisStore {
         for user in users {
             let _: () = connection
                 .hset(
-                    format!("{}tracked_users", self.key_prefix),
+                    &format!("{}tracked_users", self.key_prefix),
                     user.user_id.as_str(),
                     self.serialize_value(&user).unwrap(),
                 )
@@ -756,12 +760,15 @@ impl RedisStore {
 }
 
 #[async_trait]
-impl CryptoStore for RedisStore {
+impl<C> CryptoStore for RedisStore<C>
+where
+    C: RedisClientShim,
+{
     async fn load_account(&self) -> Result<Option<ReadOnlyAccount>> {
         // TODO: many unwraps
         let mut connection = self.client.get_async_connection().await.unwrap();
         let acct_json: Option<String> =
-            connection.get(format!("{}account", self.key_prefix)).await.unwrap();
+            connection.get(&format!("{}account", self.key_prefix)).await.unwrap();
 
         if let Some(pickle) = acct_json {
             let pickle = serde_json::from_str(&pickle)?;
@@ -790,7 +797,7 @@ impl CryptoStore for RedisStore {
     async fn load_identity(&self) -> Result<Option<PrivateCrossSigningIdentity>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let key_prefix: String = format!("{}private_identity", self.key_prefix);
-        let i_string: Option<String> = connection.get(key_prefix).await.unwrap();
+        let i_string: Option<String> = connection.get(&key_prefix).await.unwrap();
         // TODO: unwrap
         if let Some(i) = i_string {
             let pickle = serde_json::from_str(&i).unwrap();
@@ -815,7 +822,8 @@ impl CryptoStore for RedisStore {
             let mut connection = self.client.get_async_connection().await.unwrap();
 
             let key = format!("{}sessions|{}", self.key_prefix, sender_key);
-            let sessions_list_as_string: String = connection.get(key).await.unwrap(); // TODO: unwrap
+            let sessions_list_as_string: String =
+                connection.get(&key).await.unwrap().expect("sessions list does not exist"); // TODO: unwrap
             let sessions_list: Vec<PickledSession> =
                 serde_json::from_str(&sessions_list_as_string).unwrap();
 
@@ -843,10 +851,13 @@ impl CryptoStore for RedisStore {
         sender_key: &str,
         session_id: &str,
     ) -> Result<Option<InboundGroupSession>> {
+        // TODO: unwraps
         let key = format!("{}|{}|{}", room_id.as_str(), sender_key, session_id);
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        let mut connection = self.client.get_async_connection().await.unwrap(); // TODO: unwrap
-        let pickle_str: String = connection.hget(redis_key, key).await.unwrap();
+        let mut connection = self.client.get_async_connection().await.unwrap();
+        let pickle_str: String = connection.hget(&redis_key, &key).await.unwrap().expect(
+            "Unable to find inbound group session for supplied room_id, sender_key and session_id",
+        );
         let pickle = serde_json::from_str(&pickle_str).unwrap();
         // TODO: unwraps
 
@@ -862,7 +873,7 @@ impl CryptoStore for RedisStore {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         // TODO: unwraps
         let mut connection = self.client.get_async_connection().await.unwrap();
-        let igss: Vec<String> = connection.hvals(redis_key).await.unwrap();
+        let igss: Vec<String> = connection.hvals(&redis_key).await.unwrap();
 
         let pickles: Result<Vec<PickledInboundGroupSession>> = igss
             .iter()
@@ -876,7 +887,7 @@ impl CryptoStore for RedisStore {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         // TODO: unwraps
         let mut connection = self.client.get_async_connection().await.unwrap();
-        let igss: Vec<String> = connection.hvals(redis_key).await.unwrap();
+        let igss: Vec<String> = connection.hvals(&redis_key).await.unwrap();
 
         let pickles: Result<Vec<PickledInboundGroupSession>> = igss
             .iter()
@@ -899,7 +910,7 @@ impl CryptoStore for RedisStore {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         // TODO: unwraps
         let mut connection = self.client.get_async_connection().await.unwrap();
-        let igss: Vec<String> = connection.hvals(redis_key).await.unwrap();
+        let igss: Vec<String> = connection.hvals(&redis_key).await.unwrap();
 
         let pickles = igss
             .iter()
@@ -969,7 +980,7 @@ impl CryptoStore for RedisStore {
     ) -> Result<Option<ReadOnlyDevice>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let key = format!("{}devices|{}", self.key_prefix, user_id);
-        let dev: Option<String> = connection.hget(key, device_id.as_str()).await.unwrap();
+        let dev: Option<String> = connection.hget(&key, device_id.as_str()).await.unwrap();
         Ok(dev.map(|d| serde_json::from_str(&d).unwrap()))
     }
 
@@ -994,7 +1005,8 @@ impl CryptoStore for RedisStore {
     async fn get_user_identity(&self, user_id: &UserId) -> Result<Option<ReadOnlyUserIdentities>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}identities|{}", self.key_prefix, user_id);
-        let identity_string: String = connection.get(redis_key).await.unwrap();
+        let identity_string: String =
+            connection.get(&redis_key).await.unwrap().expect("identities list does not exist");
         let identity: Option<ReadOnlyUserIdentities> =
             serde_json::from_str(&identity_string).unwrap();
         Ok(identity)
@@ -1008,7 +1020,7 @@ impl CryptoStore for RedisStore {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}olm_hashes", self.key_prefix);
         Ok(connection
-            .sismember(redis_key, serde_json::to_string(message_hash).unwrap())
+            .sismember(&redis_key, &serde_json::to_string(message_hash).unwrap())
             .await
             .unwrap())
         // TODO: unwrap
@@ -1028,7 +1040,7 @@ impl CryptoStore for RedisStore {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key =
             format!("{}secret_requests_by_info|{}", self.key_prefix, key_info.redis_key());
-        let id: Option<String> = connection.get(redis_key).await.unwrap();
+        let id: Option<String> = connection.get(&redis_key).await.unwrap();
 
         if let Some(id) = id {
             self.get_outgoing_key_request_helper(&id).await
@@ -1040,7 +1052,7 @@ impl CryptoStore for RedisStore {
     async fn get_unsent_secret_requests(&self) -> Result<Vec<GossipRequest>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}unsent_secret_requests", self.key_prefix);
-        let req_map: HashMap<String, String> = connection.hgetall(redis_key).await.unwrap();
+        let req_map: HashMap<String, String> = connection.hgetall(&redis_key).await.unwrap();
         Ok(req_map.iter().map(|(_, req)| serde_json::from_str(&req).unwrap()).collect())
     }
 
@@ -1055,21 +1067,20 @@ impl CryptoStore for RedisStore {
         // could be deleting the old stuff, when others are using a newer version,
         // so we would be in an inconsistent state where the sent_request is deleted,
         // but the things it refers to still exist.
-        let mut pipeline = redis::pipe();
-        pipeline.atomic();
+        let mut pipeline = self.client.create_pipe();
         if let Some(sent_request) = sent_request {
-            pipeline.del(&okr_req_id_key).ignore();
+            pipeline.del(&okr_req_id_key);
             let usr_key = format!("{}unsent_secret_requests", self.key_prefix);
-            pipeline.hdel(&usr_key, request_id.redis_key()).ignore();
+            pipeline.hdel(&usr_key, &request_id.redis_key());
             let sent_request: GossipRequest = serde_json::from_str(&sent_request).unwrap();
             let srbi_info_key = format!(
                 "{}secret_requests_by_info|{}",
                 self.key_prefix,
                 sent_request.info.redis_key()
             );
-            pipeline.del(&srbi_info_key).ignore();
+            pipeline.del(&srbi_info_key);
         }
-        let _: () = pipeline.query_async(&mut connection).await.unwrap();
+        pipeline.query_async(&mut connection).await.unwrap();
         // TODO: unwrap
 
         Ok(())
@@ -1093,12 +1104,38 @@ impl CryptoStore for RedisStore {
 }
 
 #[cfg(test)]
-mod test {
+mod test_fake_redis {
+    use std::{collections::HashMap, sync::Arc};
+
+    use matrix_sdk_crypto::cryptostore_integration_tests;
+    use once_cell::sync::Lazy;
+    use redis::{ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
+    use tokio::sync::Mutex;
+
+    use super::RedisStore;
+    use crate::fake_redis::FakeRedisClient;
+
+    static REDIS_CLIENT: Lazy<FakeRedisClient> = Lazy::new(|| FakeRedisClient::new());
+
+    async fn get_store(name: String, passphrase: Option<&str>) -> RedisStore<FakeRedisClient> {
+        // TODO: consider using name to choose which fake to return from some map?
+        let key_prefix = format!("matrix-sdk-crypto|test|{}|", name);
+        RedisStore::open(REDIS_CLIENT.clone(), passphrase, key_prefix)
+            .await
+            .expect("Can't create a Redis store")
+    }
+
+    cryptostore_integration_tests! { integration }
+}
+
+#[cfg(test)]
+mod test_real_redis {
     use matrix_sdk_crypto::cryptostore_integration_tests;
     use once_cell::sync::Lazy;
     use redis::{AsyncCommands, Client, Commands};
 
     use super::RedisStore;
+    use crate::real_redis::RealRedisClient;
 
     static REDIS_URL: &str = "redis://127.0.0.1/";
 
@@ -1115,9 +1152,10 @@ mod test {
         client
     });
 
-    async fn get_store(name: String, passphrase: Option<&str>) -> RedisStore {
+    async fn get_store(name: String, passphrase: Option<&str>) -> RedisStore<RealRedisClient> {
         let key_prefix = format!("matrix-sdk-crypto|test|{}|", name);
-        let store = RedisStore::open(REDIS_CLIENT.clone(), passphrase, key_prefix)
+        let redis_client = RealRedisClient::from(REDIS_CLIENT.clone());
+        let store = RedisStore::open(redis_client, passphrase, key_prefix)
             .await
             .expect("Can't create a Redis store");
 
