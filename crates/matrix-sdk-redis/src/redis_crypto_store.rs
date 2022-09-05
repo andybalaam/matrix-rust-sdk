@@ -1128,6 +1128,10 @@ mod test_fake_redis {
     cryptostore_integration_tests! { integration }
 }
 
+// To run tests against a real Redis, use:
+// ```sh
+// cargo test redis --features=real-redis-tests
+// ```
 #[cfg(feature = "real-redis-tests")]
 #[cfg(test)]
 mod test_real_redis {
