@@ -1,12 +1,28 @@
+// Copyright 2022 The Matrix.org Foundation C.I.C.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
 use async_trait::async_trait;
-use redis::{FromRedisValue, RedisConnectionInfo, RedisFuture, RedisResult, ToRedisArgs};
+use redis::{FromRedisValue, RedisConnectionInfo, ToRedisArgs};
 
-use crate::redis_shim::{RedisClientShim, RedisConnectionShim, RedisPipelineShim};
+use crate::redis_shim::{
+    RedisClientShim, RedisConnectionShim, RedisFutureShim, RedisPipelineShim, RedisResultShim,
+};
 
 #[derive(Clone)]
 pub struct FakeRedisConnection {
@@ -14,12 +30,12 @@ pub struct FakeRedisConnection {
 }
 
 impl RedisConnectionShim for FakeRedisConnection {
-    fn del<'a>(&'a mut self, key: &str) -> RedisFuture<'a, ()> {
+    fn del<'a>(&'a mut self, key: &str) -> RedisFutureShim<'a, ()> {
         self.values.lock().unwrap().remove(key);
         Box::pin(async move { Ok(()) })
     }
 
-    fn get<'a, RV>(&'a mut self, key: &str) -> RedisFuture<'a, Option<RV>>
+    fn get<'a, RV>(&'a mut self, key: &str) -> RedisFutureShim<'a, Option<RV>>
     where
         RV: FromRedisValue,
     {
@@ -29,10 +45,11 @@ impl RedisConnectionShim for FakeRedisConnection {
                 None => Ok(None),
                 Some(r) => RV::from_redis_value(&r).map(|v| Some(v)),
             }
+            .map_err(|e| e.into())
         })
     }
 
-    fn set<'a, V>(&'a mut self, key: &str, value: V) -> RedisFuture<'a, ()>
+    fn set<'a, V>(&'a mut self, key: &str, value: V) -> RedisFutureShim<'a, ()>
     where
         V: ToRedisArgs + Send + Sync + 'a,
     {
@@ -43,7 +60,7 @@ impl RedisConnectionShim for FakeRedisConnection {
         Box::pin(async move { Ok(()) })
     }
 
-    fn hgetall<'a, RV>(&'a mut self, key: &str) -> RedisFuture<'a, RV>
+    fn hgetall<'a, RV>(&'a mut self, key: &str) -> RedisFutureShim<'a, RV>
     where
         RV: FromRedisValue,
     {
@@ -54,10 +71,10 @@ impl RedisConnectionShim for FakeRedisConnection {
             .get(key)
             .cloned()
             .unwrap_or_else(|| redis::Value::Bulk(Vec::new()));
-        Box::pin(async move { RV::from_redis_value(&ret) })
+        Box::pin(async move { RV::from_redis_value(&ret).map_err(|e| e.into()) })
     }
 
-    fn hdel<'a>(&'a mut self, key: &str, field: &str) -> RedisFuture<'a, ()> {
+    fn hdel<'a>(&'a mut self, key: &str, field: &str) -> RedisFutureShim<'a, ()> {
         let mut values = self.values.lock().unwrap();
         let entry = values
             .entry(String::from(key))
@@ -73,7 +90,7 @@ impl RedisConnectionShim for FakeRedisConnection {
         Box::pin(async move { Ok(()) })
     }
 
-    fn hget<'a, RV>(&'a mut self, key: &str, field: &str) -> RedisFuture<'a, Option<RV>>
+    fn hget<'a, RV>(&'a mut self, key: &str, field: &str) -> RedisFutureShim<'a, Option<RV>>
     where
         RV: FromRedisValue + Clone,
     {
@@ -88,11 +105,13 @@ impl RedisConnectionShim for FakeRedisConnection {
         let field = String::from(field);
 
         Box::pin(async move {
-            BTreeMap::<String, RV>::from_redis_value(&value).map(|hm| hm.get(&field).cloned())
+            BTreeMap::<String, RV>::from_redis_value(&value)
+                .map(|hm| hm.get(&field).cloned())
+                .map_err(|e| e.into())
         })
     }
 
-    fn hset<'a>(&'a mut self, key: &str, field: &str, value: Vec<u8>) -> RedisFuture<'a, ()> {
+    fn hset<'a>(&'a mut self, key: &str, field: &str, value: Vec<u8>) -> RedisFutureShim<'a, ()> {
         let mut values = self.values.lock().unwrap();
         let entry = values
             .entry(String::from(key))
@@ -108,7 +127,7 @@ impl RedisConnectionShim for FakeRedisConnection {
         Box::pin(async move { Ok(()) })
     }
 
-    fn hvals<'a>(&'a mut self, key: &str) -> RedisFuture<'a, Vec<String>> {
+    fn hvals<'a>(&'a mut self, key: &str) -> RedisFutureShim<'a, Vec<String>> {
         let value = self
             .values
             .lock()
@@ -120,10 +139,11 @@ impl RedisConnectionShim for FakeRedisConnection {
         Box::pin(async move {
             BTreeMap::<String, String>::from_redis_value(&value)
                 .map(|hm| hm.values().cloned().collect())
+                .map_err(|e| e.into())
         })
     }
 
-    fn sadd<'a>(&'a mut self, key: &str, value: String) -> RedisFuture<'a, ()> {
+    fn sadd<'a>(&'a mut self, key: &str, value: String) -> RedisFutureShim<'a, ()> {
         let mut values = self.values.lock().unwrap();
         let entry =
             values.entry(String::from(key)).or_insert(to_redis_value(BTreeSet::<String>::new()));
@@ -138,7 +158,7 @@ impl RedisConnectionShim for FakeRedisConnection {
         Box::pin(async move { Ok(()) })
     }
 
-    fn sismember<'a>(&'a mut self, key: &str, member: &str) -> RedisFuture<'a, bool> {
+    fn sismember<'a>(&'a mut self, key: &str, member: &str) -> RedisFutureShim<'a, bool> {
         let value = self
             .values
             .lock()
@@ -150,7 +170,9 @@ impl RedisConnectionShim for FakeRedisConnection {
         let member = String::from(member);
 
         Box::pin(async move {
-            BTreeSet::<String>::from_redis_value(&value).map(|se| se.contains(&member))
+            BTreeSet::<String>::from_redis_value(&value)
+                .map(|se| se.contains(&member))
+                .map_err(|e| e.into())
         })
     }
 }
@@ -187,7 +209,7 @@ impl FakeRedisClient {
 impl RedisClientShim for FakeRedisClient {
     type Conn = FakeRedisConnection;
 
-    async fn get_async_connection(&self) -> RedisResult<Self::Conn> {
+    async fn get_async_connection(&self) -> RedisResultShim<Self::Conn> {
         Ok(FakeRedisConnection { values: self.values.clone() })
     }
 
@@ -247,7 +269,7 @@ impl RedisPipelineShim for FakeRedisPipeline {
         self.cmds.push(PipelineCommand::Sadd(String::from(key), String::from(value)));
     }
 
-    async fn query_async(&self, connection: &mut Self::Conn) -> RedisResult<()> {
+    async fn query_async(&self, connection: &mut Self::Conn) -> RedisResultShim<()> {
         for cmd in &self.cmds {
             match cmd {
                 PipelineCommand::Del(key) => connection.del(key).await?,

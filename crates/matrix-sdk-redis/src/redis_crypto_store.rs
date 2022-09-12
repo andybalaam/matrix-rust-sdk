@@ -56,13 +56,12 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::redis_shim::{RedisClientShim, RedisConnectionShim};
+use crate::redis_shim::{RedisClientShim, RedisConnectionShim, RedisErrorShim};
 //use crate::olm::PrivateCrossSigningIdentity;
 
 /// This needs to be 32 bytes long since AES-GCM requires it, otherwise we will
 /// panic once we try to pickle a Signing object.
 const DEFAULT_PICKLE: &str = "DEFAULT_PICKLE_PASSPHRASE_123456";
-//const DATABASE_VERSION: u8 = 3;
 
 // TODO: use this everywhere we manually find a key
 trait RedisKey {
@@ -139,9 +138,6 @@ impl RedisKey for (&str, &str, &str) {
         .concat()
     }
 }*/
-
-// TODO: maybe we should do something similar to the above to standardise the
-//       keys for Redis
 
 #[derive(Clone, Debug)]
 pub struct AccountInfo {
@@ -224,7 +220,6 @@ where
     /// passphrase to encrypt private data and assuming all Redis keys are
     /// prefixed with the given string.
     pub async fn open(client: C, passphrase: Option<&str>, key_prefix: String) -> Result<Self> {
-        // TODO: allow supplying an additional prefix for your Redis keys
         let mut connection = client.get_async_connection().await.unwrap();
 
         let store_cipher = if let Some(passphrase) = passphrase {
@@ -279,10 +274,12 @@ where
 
     async fn reset_backup_state(&self) -> Result<()> {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        let mut connection = self.client.get_async_connection().await.unwrap(); // TODO: unwrap
+        let mut connection =
+            self.client.get_async_connection().await.map_err(CryptoStoreError::from)?;
 
         // Read out all the sessions, set them as not backed up
-        let sessions: Vec<(String, String)> = connection.hgetall(&redis_key).await.unwrap();
+        let sessions: Vec<(String, String)> =
+            connection.hgetall(&redis_key).await.map_err(CryptoStoreError::from)?;
         let pickles: Vec<(String, PickledInboundGroupSession)> = sessions
             .into_iter()
             .map(|(k, s)| {
