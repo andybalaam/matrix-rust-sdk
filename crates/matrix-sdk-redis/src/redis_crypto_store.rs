@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused)] // TODO
+#![allow(unused)] // TODO: consider removing when this code is used
 
 use std::{
     any::Any,
@@ -30,7 +30,7 @@ use matrix_sdk_common::locks::Mutex;
 use matrix_sdk_crypto::{
     olm::{
         IdentityKeys, InboundGroupSession, OutboundGroupSession, PickledInboundGroupSession,
-        PickledSession, PrivateCrossSigningIdentity, Session,
+        PickledOutboundGroupSession, PickledSession, PrivateCrossSigningIdentity, Session,
     },
     store::{
         caches::SessionStore, BackupKeys, Changes, CryptoStore, CryptoStoreError, PickleKey,
@@ -274,12 +274,10 @@ where
 
     async fn reset_backup_state(&self) -> Result<()> {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        let mut connection =
-            self.client.get_async_connection().await.map_err(CryptoStoreError::from)?;
+        let mut connection = self.client.get_async_connection().await?;
 
         // Read out all the sessions, set them as not backed up
-        let sessions: Vec<(String, String)> =
-            connection.hgetall(&redis_key).await.map_err(CryptoStoreError::from)?;
+        let sessions: Vec<(String, String)> = connection.hgetall(&redis_key).await?;
         let pickles: Vec<(String, PickledInboundGroupSession)> = sessions
             .into_iter()
             .map(|(k, s)| {
@@ -293,8 +291,7 @@ where
         let mut pipeline = self.client.create_pipe();
 
         for (k, pickle) in pickles {
-            pipeline.hset(&redis_key, &k, serde_json::to_string(&pickle).unwrap());
-            // TODO: unwrap
+            pipeline.hset(&redis_key, &k, serde_json::to_string(&pickle)?);
         }
 
         pipeline.query_async(&mut connection).await.unwrap();
@@ -466,18 +463,17 @@ where
     where
         Conn: RedisConnectionShim,
     {
-        // TODO: unwraps
         let key_id = format!("{}{}", key_prefix, "store_cipher");
-        let key_db_entry: Option<String> = connection.get(&key_id).await.unwrap();
+        let key_db_entry: Option<String> = connection.get(&key_id).await?;
         let key = if let Some(key_db_entry) = key_db_entry {
-            let key_json: Vec<u8> = serde_json::from_str(&key_db_entry).unwrap();
+            let key_json: Vec<u8> = serde_json::from_str(&key_db_entry)?;
             StoreCipher::import(passphrase, &key_json)
                 .map_err(|_| CryptoStoreError::UnpicklingError)?
         } else {
             let key = StoreCipher::new().map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
             let encrypted =
                 key.export(passphrase).map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
-            let _: () = connection.set(&key_id, encrypted).await.unwrap();
+            let _: () = connection.set(&key_id, encrypted).await?;
             key
         };
 
@@ -485,10 +481,9 @@ where
     }
 
     async fn load_tracked_users(&self) -> Result<()> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        // TODO: unwrap
+        let mut connection = self.client.get_async_connection().await?;
         let tracked_users: HashMap<String, Vec<u8>> =
-            connection.hgetall(&format!("{}tracked_users", self.key_prefix)).await.unwrap();
+            connection.hgetall(&format!("{}tracked_users", self.key_prefix)).await?;
 
         for (_, user) in tracked_users {
             let user: TrackedUser = self.deserialize_value(&user)?;
@@ -509,23 +504,26 @@ where
     ) -> Result<Option<OutboundGroupSession>> {
         let account_info = self.get_account_info().ok_or(CryptoStoreError::AccountUnset)?;
 
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        // TODO: unwrap
+        let mut connection = self.client.get_async_connection().await?;
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
-        let session: Option<String> = connection.hget(&redis_key, room_id.as_str()).await.unwrap();
+        let session_str: Option<String> = connection.hget(&redis_key, room_id.as_str()).await?;
 
-        Ok(session
-            .map(|s: String| serde_json::from_str(&s).map_err(CryptoStoreError::Serialization))
-            .transpose()?
-            .map(|p| {
-                OutboundGroupSession::from_pickle(
-                    account_info.device_id,
-                    account_info.identity_keys,
-                    p,
-                )
-                .unwrap()
-            }))
+        if let Some(session_str) = session_str {
+            let session: PickledOutboundGroupSession =
+                serde_json::from_str(&session_str).map_err(CryptoStoreError::Serialization)?;
+
+            let unpickled: OutboundGroupSession = OutboundGroupSession::from_pickle(
+                account_info.device_id,
+                account_info.identity_keys,
+                session,
+            )
+            .map_err(|e| CryptoStoreError::Pickle(e))?;
+
+            Ok(Some(unpickled))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn save_changes(&self, changes: Changes) -> Result<()> {
