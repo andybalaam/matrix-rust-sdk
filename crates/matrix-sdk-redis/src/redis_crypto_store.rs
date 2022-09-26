@@ -581,32 +581,28 @@ where
         let key_requests = changes.key_requests;
         let backup_version = changes.backup_version;
 
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
 
         // Wrap in a Redis transaction
         let mut pipeline = self.client.create_pipe();
 
         if let Some(a) = &account_pickle {
-            pipeline.set_vec(
-                &format!("{}account", self.key_prefix),
-                serde_json::to_vec(a).unwrap(), // TODO unwrap
-            );
+            pipeline.set_vec(&format!("{}account", self.key_prefix), serde_json::to_vec(a)?);
         }
 
         if let Some(i) = &private_identity_pickle {
             let redis_key = format!("{}private_identity", self.key_prefix);
-            pipeline.set(&redis_key, serde_json::to_string(&i).unwrap());
+            pipeline.set(&redis_key, serde_json::to_string(&i)?);
         }
 
         for (key, sessions) in &session_changes {
             let redis_key = format!("{}sessions|{}", self.key_prefix, key);
-            pipeline.set(&redis_key, serde_json::to_string(sessions).unwrap());
+            pipeline.set(&redis_key, serde_json::to_string(sessions)?);
         }
 
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         for (key, inbound_group_sessions) in &inbound_session_changes {
-            pipeline.hset(&redis_key, key, serde_json::to_string(inbound_group_sessions).unwrap());
-            // TODO: unwrap
+            pipeline.hset(&redis_key, key, serde_json::to_string(inbound_group_sessions)?);
         }
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
@@ -614,15 +610,13 @@ where
             pipeline.hset(
                 &redis_key,
                 key.as_str(),
-                serde_json::to_string(outbound_group_sessions).unwrap(),
+                serde_json::to_string(outbound_group_sessions)?,
             );
-            // TODO: unwrap
         }
 
         let redis_key = format!("{}olm_hashes", self.key_prefix);
         for hash in &olm_hashes {
-            pipeline.sadd(&redis_key, serde_json::to_string(hash).unwrap());
-            // TODO unwrap
+            pipeline.sadd(&redis_key, serde_json::to_string(hash)?);
         }
 
         let unsent_secret_requests_key = format!("{}unsent_secret_requests", self.key_prefix);
@@ -641,31 +635,21 @@ where
                 format!("{}outgoing_secret_requests|{}", self.key_prefix, key_request_id);
             if key_request.sent_out {
                 pipeline.hdel(&unsent_secret_requests_key, &key_request_id);
-                pipeline.set(
-                    &outgoing_secret_requests_key,
-                    serde_json::to_string(&key_request).unwrap(),
-                );
-                // TODO: unwraps
+                pipeline.set(&outgoing_secret_requests_key, serde_json::to_string(&key_request)?);
             } else {
                 pipeline.del(&outgoing_secret_requests_key);
                 pipeline.hset(
                     &unsent_secret_requests_key,
                     &key_request_id,
-                    serde_json::to_string(&key_request).unwrap(),
+                    serde_json::to_string(&key_request)?,
                 );
-                // TODO: unwraps
             }
         }
 
         for device in device_changes.new.iter().chain(&device_changes.changed) {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
 
-            pipeline.hset(
-                &redis_key,
-                device.device_id().as_str(),
-                serde_json::to_string(device).unwrap(),
-            );
-            // TODO: unwrap
+            pipeline.hset(&redis_key, device.device_id().as_str(), serde_json::to_string(device)?);
         }
 
         for device in device_changes.deleted {
@@ -676,22 +660,20 @@ where
         for identity in identity_changes.changed.iter().chain(&identity_changes.new) {
             let redis_key = format!("{}identities|{}", self.key_prefix, identity.user_id());
 
-            pipeline.set(&redis_key, serde_json::to_string(identity).unwrap());
-            // TODO: unwrap
+            pipeline.set(&redis_key, serde_json::to_string(identity)?);
         }
 
         if let Some(r) = &recovery_key_pickle {
             let redis_key = format!("{}recovery_key_v1", self.key_prefix);
-            pipeline.set_vec(&redis_key, self.serialize_value(r).unwrap());
+            pipeline.set_vec(&redis_key, self.serialize_value(r)?);
         }
 
         if let Some(r) = &backup_version {
             let redis_key = format!("{}backup_version_v1", self.key_prefix);
-            pipeline.set_vec(&redis_key, self.serialize_value(r).unwrap());
+            pipeline.set_vec(&redis_key, self.serialize_value(r)?);
         }
 
-        pipeline.query_async(&mut connection).await.unwrap();
-        // TODO: unwrap
+        pipeline.query_async(&mut connection).await?;
 
         Ok(())
     }
@@ -700,17 +682,14 @@ where
         &self,
         request_id: &str,
     ) -> Result<Option<GossipRequest>> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let redis_key = format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id);
-        let req_string: Option<String> = connection.get(&redis_key).await.unwrap();
-        let request = req_string.map(|req_string| serde_json::from_str(&req_string).unwrap());
-        // TODO: unwraps
-
+        let req_string: Option<String> = connection.get(&redis_key).await?;
+        let request = req_string.map(|req_string| serde_json::from_str(&req_string)).transpose()?;
         let request = if request.is_none() {
             let redis_key = format!("{}unsent_secret_requests", self.key_prefix);
-            let req_string: Option<String> = connection.hget(&redis_key, request_id).await.unwrap();
-            req_string.map(|req_string| serde_json::from_str(&req_string).unwrap())
-            // TODO: unwraps
+            let req_string: Option<String> = connection.hget(&redis_key, request_id).await?;
+            req_string.map(|req_string| serde_json::from_str(&req_string)).transpose()?
         } else {
             request
         };
