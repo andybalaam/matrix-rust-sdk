@@ -794,10 +794,9 @@ where
 
             let key = format!("{}sessions|{}", self.key_prefix, sender_key);
             let sessions_list_as_string: Option<String> = connection.get(&key).await?;
-            let sessions_list: Vec<PickledSession> = if let Some(lst) = sessions_list_as_string {
-                serde_json::from_str(&lst).unwrap()
-            } else {
-                Vec::new()
+            let sessions_list: Vec<PickledSession> = match sessions_list_as_string {
+                Some(sessions_list_as_string) => serde_json::from_str(&sessions_list_as_string)?,
+                _ => Vec::new(),
             };
 
             let sessions: Vec<Session> = sessions_list
@@ -824,21 +823,16 @@ where
         sender_key: &str,
         session_id: &str,
     ) -> Result<Option<InboundGroupSession>> {
-        // TODO: unwraps
         let key = format!("{}|{}|{}", room_id.as_str(), sender_key, session_id);
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        let pickle_str: String = connection.hget(&redis_key, &key).await.unwrap().expect(
-            "Unable to find inbound group session for supplied room_id, sender_key and session_id",
-        );
-        let pickle = serde_json::from_str(&pickle_str).unwrap();
-        // TODO: unwraps
+        let mut connection = self.client.get_async_connection().await?;
+        let pickle_str: Option<String> = connection.hget(&redis_key, &key).await?;
 
-        // TODO: could this really be None?  Might be a hangover from copying SLED
-        if let Some(pickle) = pickle {
-            Ok(Some(InboundGroupSession::from_pickle(pickle)?))
-        } else {
-            Ok(None)
+        match pickle_str {
+            Some(pickle_str) => {
+                Ok(Some(InboundGroupSession::from_pickle(serde_json::from_str(&pickle_str)?)?))
+            }
+            _ => Ok(None),
         }
     }
 
