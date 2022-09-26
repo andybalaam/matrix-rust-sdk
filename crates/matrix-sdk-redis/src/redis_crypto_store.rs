@@ -738,10 +738,9 @@ where
     C: RedisClientShim,
 {
     async fn load_account(&self) -> Result<Option<ReadOnlyAccount>> {
-        // TODO: many unwraps
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let acct_json: Option<String> =
-            connection.get(&format!("{}account", self.key_prefix)).await.unwrap();
+            connection.get(&format!("{}account", self.key_prefix)).await?;
 
         if let Some(pickle) = acct_json {
             let pickle = serde_json::from_str(&pickle)?;
@@ -768,12 +767,11 @@ where
     }
 
     async fn load_identity(&self) -> Result<Option<PrivateCrossSigningIdentity>> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let key_prefix: String = format!("{}private_identity", self.key_prefix);
-        let i_string: Option<String> = connection.get(&key_prefix).await.unwrap();
-        // TODO: unwrap
+        let i_string: Option<String> = connection.get(&key_prefix).await?;
         if let Some(i) = i_string {
-            let pickle = serde_json::from_str(&i).unwrap();
+            let pickle = serde_json::from_str(&i)?;
             Ok(Some(
                 PrivateCrossSigningIdentity::from_pickle(pickle)
                     .await
@@ -795,10 +793,12 @@ where
             let mut connection = self.client.get_async_connection().await.unwrap();
 
             let key = format!("{}sessions|{}", self.key_prefix, sender_key);
-            let sessions_list_as_string: String =
-                connection.get(&key).await.unwrap().expect("sessions list does not exist"); // TODO: unwrap
-            let sessions_list: Vec<PickledSession> =
-                serde_json::from_str(&sessions_list_as_string).unwrap();
+            let sessions_list_as_string: Option<String> = connection.get(&key).await?;
+            let sessions_list: Vec<PickledSession> = if let Some(lst) = sessions_list_as_string {
+                serde_json::from_str(&lst).unwrap()
+            } else {
+                Vec::new()
+            };
 
             let sessions: Vec<Session> = sessions_list
                 .into_iter()
