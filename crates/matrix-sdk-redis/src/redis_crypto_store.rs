@@ -838,9 +838,8 @@ where
 
     async fn get_inbound_group_sessions(&self) -> Result<Vec<InboundGroupSession>> {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        // TODO: unwraps
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        let igss: Vec<String> = connection.hvals(&redis_key).await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
+        let igss: Vec<String> = connection.hvals(&redis_key).await?;
 
         let pickles: Result<Vec<PickledInboundGroupSession>> = igss
             .iter()
@@ -852,17 +851,15 @@ where
 
     async fn inbound_group_session_counts(&self) -> Result<RoomKeyCounts> {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        // TODO: unwraps
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        let igss: Vec<String> = connection.hvals(&redis_key).await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
+        let igss: Vec<String> = connection.hvals(&redis_key).await?;
 
         let pickles: Result<Vec<PickledInboundGroupSession>> = igss
             .iter()
             .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
             .collect();
 
-        // TODO: unwraps if JSON didn't parse
-        let pickles = pickles.unwrap();
+        let pickles = pickles?;
 
         let total = pickles.len();
         let backed_up = pickles.into_iter().filter(|p| p.backed_up).count();
@@ -875,9 +872,8 @@ where
         limit: usize,
     ) -> Result<Vec<InboundGroupSession>> {
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
-        // TODO: unwraps
-        let mut connection = self.client.get_async_connection().await.unwrap();
-        let igss: Vec<String> = connection.hvals(&redis_key).await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
+        let igss: Vec<String> = connection.hvals(&redis_key).await?;
 
         let pickles = igss
             .iter()
@@ -945,10 +941,10 @@ where
         user_id: &UserId,
         device_id: &DeviceId,
     ) -> Result<Option<ReadOnlyDevice>> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let key = format!("{}devices|{}", self.key_prefix, user_id);
-        let dev: Option<String> = connection.hget(&key, device_id.as_str()).await.unwrap();
-        Ok(dev.map(|d| serde_json::from_str(&d).unwrap()))
+        let dev: Option<String> = connection.hget(&key, device_id.as_str()).await?;
+        Ok(dev.map(|d| serde_json::from_str(&d)).transpose()?)
     }
 
     async fn get_user_devices(
