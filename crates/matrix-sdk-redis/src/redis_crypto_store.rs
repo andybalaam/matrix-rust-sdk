@@ -715,19 +715,18 @@ where
             .map(|(u, d)| TrackedUser { user_id: (*u).into(), dirty: *d })
             .collect();
 
-        // TODO: transaction?
-        // TODO: unwrap
+        let mut pipeline = self.client.create_pipe();
 
         for user in users {
-            let _: () = connection
-                .hset(
-                    &format!("{}tracked_users", self.key_prefix),
-                    user.user_id.as_str(),
-                    self.serialize_value(&user).unwrap(),
-                )
-                .await
-                .unwrap(); // TODO: unwrap
+            let _: () = pipeline.hset(
+                &format!("{}tracked_users", self.key_prefix),
+                user.user_id.as_str(),
+                String::from_utf8(self.serialize_value(&user)?)
+                    .map_err(|e| CryptoStoreError::Backend(Box::new(e)))?,
+            );
         }
+
+        pipeline.query_async(&mut connection).await?;
 
         Ok(())
     }
