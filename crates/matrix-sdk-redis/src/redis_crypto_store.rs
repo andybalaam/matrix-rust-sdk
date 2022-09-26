@@ -951,18 +951,17 @@ where
         &self,
         user_id: &UserId,
     ) -> Result<HashMap<OwnedDeviceId, ReadOnlyDevice>> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let user_device: HashMap<String, String> =
-            connection.hgetall(&format!("{}devices|{}", self.key_prefix, user_id)).await.unwrap();
+            connection.hgetall(&format!("{}devices|{}", self.key_prefix, user_id)).await?;
 
-        Ok(user_device
+        user_device
             .into_iter()
             .map(|(device_id, device_str)| {
-                (device_id.into(), serde_json::from_str(&device_str).unwrap())
+                let d = serde_json::from_str(&device_str)?;
+                Ok((device_id.into(), d))
             })
-            .collect())
-
-        // TODO: unwrap
+            .collect()
     }
 
     async fn get_user_identity(&self, user_id: &UserId) -> Result<Option<ReadOnlyUserIdentities>> {
