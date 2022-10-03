@@ -965,27 +965,21 @@ where
     }
 
     async fn get_user_identity(&self, user_id: &UserId) -> Result<Option<ReadOnlyUserIdentities>> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let redis_key = format!("{}identities|{}", self.key_prefix, user_id);
-        let identity_string: String =
-            connection.get(&redis_key).await.unwrap().expect("identities list does not exist");
-        let identity: Option<ReadOnlyUserIdentities> =
-            serde_json::from_str(&identity_string).unwrap();
+        let identity_string: Option<String> = connection.get(&redis_key).await?;
+        let identity = identity_string.map(|s| serde_json::from_str(&s)).transpose()?;
         Ok(identity)
-        // TODO: unwrap
     }
 
     async fn is_message_known(
         &self,
         message_hash: &matrix_sdk_crypto::olm::OlmMessageHash,
     ) -> Result<bool> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let redis_key = format!("{}olm_hashes", self.key_prefix);
-        Ok(connection
-            .sismember(&redis_key, &serde_json::to_string(message_hash).unwrap())
-            .await
-            .unwrap())
-        // TODO: unwrap
+        let ret = connection.sismember(&redis_key, &serde_json::to_string(message_hash)?).await?;
+        Ok(ret)
     }
 
     async fn get_outgoing_secret_requests(
@@ -1019,22 +1013,22 @@ where
     }
 
     async fn delete_outgoing_secret_requests(&self, request_id: &TransactionId) -> Result<()> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let okr_req_id_key =
             format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id.redis_key());
-        let sent_request: Option<String> = connection.get(&okr_req_id_key).await.unwrap();
+        let sent_request: Option<String> = connection.get(&okr_req_id_key).await?;
 
         // Wrap the deletes in a Redis transaction
         // TODO: race: if someone updates sent_request before we delete it, we
         // could be deleting the old stuff, when others are using a newer version,
         // so we would be in an inconsistent state where the sent_request is deleted,
-        // but the things it refers to still exist.
+        // but the things it refers to still exists.
         let mut pipeline = self.client.create_pipe();
         if let Some(sent_request) = sent_request {
             pipeline.del(&okr_req_id_key);
             let usr_key = format!("{}unsent_secret_requests", self.key_prefix);
             pipeline.hdel(&usr_key, &request_id.redis_key());
-            let sent_request: GossipRequest = serde_json::from_str(&sent_request).unwrap();
+            let sent_request: GossipRequest = serde_json::from_str(&sent_request)?;
             let srbi_info_key = format!(
                 "{}secret_requests_by_info|{}",
                 self.key_prefix,
@@ -1042,24 +1036,21 @@ where
             );
             pipeline.del(&srbi_info_key);
         }
-        pipeline.query_async(&mut connection).await.unwrap();
-        // TODO: unwrap
+        pipeline.query_async(&mut connection).await?;
 
         Ok(())
     }
 
     async fn load_backup_keys(&self) -> Result<BackupKeys> {
-        let mut connection = self.client.get_async_connection().await.unwrap();
+        let mut connection = self.client.get_async_connection().await?;
         let redis_key = format!("{}backup_version_v1", self.key_prefix);
-        // TODO: unwrap
-        let version_v: Option<Vec<u8>> = connection.get(&redis_key).await.unwrap();
-        let version = version_v.map(|v| self.deserialize_value(&v).unwrap());
+        let version_v: Option<Vec<u8>> = connection.get(&redis_key).await?;
+        let version = version_v.map(|v| self.deserialize_value(&v)).transpose()?;
 
         let redis_key = format!("{}recovery_key_v1", self.key_prefix);
-        // TODO: unwrap
-        let recovery_key_str: Option<Vec<u8>> = connection.get(&redis_key).await.unwrap();
+        let recovery_key_str: Option<Vec<u8>> = connection.get(&redis_key).await?;
         let recovery_key: Option<RecoveryKey> =
-            recovery_key_str.map(|s| self.deserialize_value(&s).unwrap());
+            recovery_key_str.map(|s| self.deserialize_value(&s)).transpose()?;
 
         Ok(BackupKeys { backup_version: version, recovery_key })
     }
@@ -1080,7 +1071,6 @@ mod test_fake_redis {
     static REDIS_CLIENT: Lazy<FakeRedisClient> = Lazy::new(|| FakeRedisClient::new());
 
     async fn get_store(name: String, passphrase: Option<&str>) -> RedisStore<FakeRedisClient> {
-        // TODO: consider using name to choose which fake to return from some map?
         let key_prefix = format!("matrix-sdk-crypto|test|{}|", name);
         RedisStore::open(REDIS_CLIENT.clone(), passphrase, key_prefix)
             .await
