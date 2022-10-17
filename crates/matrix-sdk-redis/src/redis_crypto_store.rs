@@ -292,7 +292,8 @@ where
         let pickles: Vec<(String, PickledInboundGroupSession)> = sessions
             .into_iter()
             .map(|(k, s)| {
-                let mut pickle: PickledInboundGroupSession = serde_json::from_str(&s).unwrap();
+                let mut pickle: PickledInboundGroupSession =
+                    self.deserialize_value(s.as_bytes()).unwrap();
                 pickle.backed_up = false;
                 (k, pickle)
             })
@@ -302,7 +303,12 @@ where
         let mut pipeline = self.client.create_pipe();
 
         for (k, pickle) in pickles {
-            pipeline.hset(&redis_key, &k, serde_json::to_string(&pickle)?);
+            pipeline.hset(
+                &redis_key,
+                &k,
+                String::from_utf8(self.serialize_value(&pickle)?)
+                    .expect("Invalid UTF-8 from serialize_value!"),
+            );
         }
 
         pipeline.query_async(&mut connection).await.unwrap();
@@ -613,7 +619,12 @@ where
 
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         for (key, inbound_group_sessions) in &inbound_session_changes {
-            pipeline.hset(&redis_key, key, serde_json::to_string(inbound_group_sessions)?);
+            pipeline.hset(
+                &redis_key,
+                key,
+                String::from_utf8(self.serialize_value(&inbound_group_sessions)?)
+                    .expect("serialize_value returned non-UTF-8!"),
+            );
         }
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
@@ -840,9 +851,9 @@ where
         let pickle_str: Option<String> = connection.hget(&redis_key, &key).await?;
 
         match pickle_str {
-            Some(pickle_str) => {
-                Ok(Some(InboundGroupSession::from_pickle(serde_json::from_str(&pickle_str)?)?))
-            }
+            Some(pickle_str) => Ok(Some(InboundGroupSession::from_pickle(
+                self.deserialize_value(pickle_str.as_bytes())?,
+            )?)),
             _ => Ok(None),
         }
     }
@@ -852,10 +863,8 @@ where
         let mut connection = self.client.get_async_connection().await?;
         let igss: Vec<String> = connection.hvals(&redis_key).await?;
 
-        let pickles: Result<Vec<PickledInboundGroupSession>> = igss
-            .iter()
-            .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
-            .collect();
+        let pickles: Result<Vec<PickledInboundGroupSession>> =
+            igss.iter().map(|p| self.deserialize_value(p.as_bytes())).collect();
 
         Ok(pickles?.into_iter().filter_map(|p| InboundGroupSession::from_pickle(p).ok()).collect())
     }
@@ -865,10 +874,8 @@ where
         let mut connection = self.client.get_async_connection().await?;
         let igss: Vec<String> = connection.hvals(&redis_key).await?;
 
-        let pickles: Result<Vec<PickledInboundGroupSession>> = igss
-            .iter()
-            .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
-            .collect();
+        let pickles: Result<Vec<PickledInboundGroupSession>> =
+            igss.iter().map(|p| self.deserialize_value(p.as_bytes())).collect();
 
         let pickles = pickles?;
 
@@ -888,7 +895,7 @@ where
 
         let pickles = igss
             .iter()
-            .map(|p| serde_json::from_str(p).map_err(CryptoStoreError::Serialization))
+            .map(|p| self.deserialize_value(p.as_bytes()))
             .filter_map(|p: Result<PickledInboundGroupSession, CryptoStoreError>| match p {
                 Ok(p) => {
                     if !p.backed_up {
