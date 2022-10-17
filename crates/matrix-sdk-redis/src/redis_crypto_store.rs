@@ -481,10 +481,9 @@ where
         Conn: RedisConnectionShim,
     {
         let key_id = format!("{}{}", key_prefix, "store_cipher");
-        let key_db_entry: Option<String> = connection.get(&key_id).await?;
+        let key_db_entry: Option<Vec<u8>> = connection.get(&key_id).await?;
         let key = if let Some(key_db_entry) = key_db_entry {
-            let key_json: Vec<u8> = serde_json::from_str(&key_db_entry)?;
-            StoreCipher::import(passphrase, &key_json)
+            StoreCipher::import(passphrase, &key_db_entry)
                 .map_err(|_| CryptoStoreError::UnpicklingError)?
         } else {
             let key = StoreCipher::new().map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
