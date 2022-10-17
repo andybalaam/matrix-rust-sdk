@@ -603,7 +603,7 @@ where
         let mut pipeline = self.client.create_pipe();
 
         if let Some(a) = &account_pickle {
-            pipeline.set_vec(&format!("{}account", self.key_prefix), serde_json::to_vec(a)?);
+            pipeline.set_vec(&format!("{}account", self.key_prefix), self.serialize_value(a)?);
         }
 
         if let Some(i) = &private_identity_pickle {
@@ -760,11 +760,11 @@ where
 {
     async fn load_account(&self) -> Result<Option<ReadOnlyAccount>> {
         let mut connection = self.client.get_async_connection().await?;
-        let acct_json: Option<String> =
+        let acct_json: Option<Vec<u8>> =
             connection.get(&format!("{}account", self.key_prefix)).await?;
 
         if let Some(pickle) = acct_json {
-            let pickle = serde_json::from_str(&pickle)?;
+            let pickle = self.deserialize_value(&pickle)?;
             self.load_tracked_users().await?;
 
             let account = ReadOnlyAccount::from_pickle(pickle)?;
