@@ -486,11 +486,16 @@ where
             StoreCipher::import(passphrase, &key_db_entry)
                 .map_err(|_| CryptoStoreError::UnpicklingError)?
         } else {
-            let key = StoreCipher::new().map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
-            let encrypted =
-                key.export(passphrase).map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
-            let _: () = connection.set(&key_id, encrypted).await?;
-            key
+            let cipher = StoreCipher::new().map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
+
+            #[cfg(not(test))]
+            let export = cipher.export(passphrase);
+            #[cfg(test)]
+            let export = cipher._insecure_export_fast_for_testing(passphrase);
+
+            let export = export.map_err(|e| CryptoStoreError::Backend(Box::new(e)))?;
+            let _: () = connection.set(&key_id, export).await?;
+            cipher
         };
 
         Ok(key)
