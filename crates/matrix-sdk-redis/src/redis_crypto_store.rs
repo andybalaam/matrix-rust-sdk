@@ -26,7 +26,6 @@ use async_trait::async_trait;
 use dashmap::DashSet;
 use futures_util::FutureExt;
 use matrix_sdk_common::locks::Mutex;
-//use tracing::debug;
 use matrix_sdk_crypto::{
     olm::{
         IdentityKeys, InboundGroupSession, OutboundGroupSession, PickledInboundGroupSession,
@@ -40,13 +39,6 @@ use matrix_sdk_crypto::{
     GossipRequest, LocalTrust, ReadOnlyAccount, ReadOnlyDevice, ReadOnlyUserIdentities, SecretInfo,
 };
 use matrix_sdk_store_encryption::StoreCipher;
-// vdmc use olm_rs::{account::IdentityKeys, PicklingMode};
-//use serde::{Deserialize, Serialize};
-//pub use sled::Error;
-//use sled::{
-//    transaction::{ConflictableTransactionError, TransactionError},
-//    Config, Db, IVec, Transactional, Tree,
-//};
 use redis::{
     aio::Connection, AsyncCommands, Client, ConnectionInfo, FromRedisValue, RedisConnectionInfo,
     RedisError, RedisFuture, RedisResult, ToRedisArgs,
@@ -58,13 +50,11 @@ use ruma::{
 use serde::{Deserialize, Serialize};
 
 use crate::redis_shim::{RedisClientShim, RedisConnectionShim, RedisErrorShim};
-//use crate::olm::PrivateCrossSigningIdentity;
 
 /// This needs to be 32 bytes long since AES-GCM requires it, otherwise we will
 /// panic once we try to pickle a Signing object.
 const DEFAULT_PICKLE: &str = "DEFAULT_PICKLE_PASSPHRASE_123456";
 
-// TODO: use this everywhere we manually find a key
 trait RedisKey {
     fn redis_key(&self) -> String;
 }
@@ -131,25 +121,6 @@ where
     }
 }
 
-/*impl RedisKey for &UserId {
-    fn redis_key(&self) -> Vec<u8> {
-        self.as_str().redis_key()
-    }
-}
-
-impl RedisKey for &ReadOnlyDevice {
-    fn redis_key(&self) -> Vec<u8> {
-        (self.user_id().as_str(), self.device_id().as_str()).redis_key()
-    }
-}*/
-
-/*impl RedisKey for (&str, &str) {
-    fn redis_key(&self) -> Vec<u8> {
-        [self.0.as_bytes(), &[Self::SEPARATOR], self.1.as_bytes(), &[Self::SEPARATOR]].concat()
-    }
-}
-*/
-
 #[derive(Clone, Debug)]
 pub struct AccountInfo {
     user_id: Arc<UserId>,
@@ -177,22 +148,6 @@ where
     session_cache: SessionStore,
     tracked_users_cache: Arc<DashSet<OwnedUserId>>,
     users_for_key_query_cache: Arc<DashSet<OwnedUserId>>,
-    /*    account: Tree,
-     *    private_identity: Tree,
-     *
-     *    olm_hashes: Tree,
-     *    sessions: Tree,
-     *    inbound_group_sessions: Tree,
-     *    outbound_group_sessions: Tree,
-     *
-     *    outgoing_secret_requests: Tree,
-     *    unsent_secret_requests: Tree,
-     *    secret_requests_by_info: Tree,
-     *
-     *    devices: Tree,
-     *    identities: Tree,
-     *
-     *    tracked_users: Tree, */
 }
 
 impl<C> std::fmt::Debug for RedisStore<C>
@@ -244,12 +199,6 @@ where
             users_for_key_query_cache: Arc::new(DashSet::new()),
         })
     }
-
-    //    /// Create a sled based cryptostore using the given sled database.
-    //    /// The given passphrase will be used to encrypt private data.
-    //    pub fn open_with_database(db: Db, passphrase: Option<&str>) ->
-    // Result<Self> {        RedisStore::open_helper(db, None, passphrase)
-    //    }
 
     fn get_account_info(&self) -> Option<AccountInfo> {
         self.account_info.read().unwrap().clone()
@@ -306,162 +255,6 @@ where
 
         Ok(())
     }
-
-    //    fn upgrade(&self) -> Result<()> {
-    //        let version = self
-    //            .inner
-    //            .get("store_version")?
-    //            .map(|v| {
-    //                let (version_bytes, _) =
-    // v.split_at(std::mem::size_of::<u8>());
-    // u8::from_be_bytes(version_bytes.try_into().unwrap_or_default())
-    //            })
-    //            .unwrap_or_default();
-    //
-    //        if version != DATABASE_VERSION {
-    //            debug!(version, new_version = DATABASE_VERSION, "Upgrading the
-    // Redis crypto store");        }
-    //
-    //        if version == 0 {
-    //            // We changed the schema but migrating this isn't important since
-    // we            // rotate the group sessions relatively often anyways so we
-    // just            // clear the tree.
-    //            self.outbound_group_sessions.clear()?;
-    //        }
-    //
-    //        if version <= 1 {
-    //            #[derive(Serialize, Deserialize)]
-    //            pub struct OldReadOnlyDevice {
-    //                user_id: UserId,
-    //                device_id: DeviceIdBox,
-    //                algorithms: Vec<EventEncryptionAlgorithm>,
-    //                keys: BTreeMap<DeviceKeyId, String>,
-    //                signatures: BTreeMap<UserId, BTreeMap<DeviceKeyId, String>>,
-    //                display_name: Option<String>,
-    //                deleted: bool,
-    //                trust_state: LocalTrust,
-    //            }
-    //
-    //            #[allow(clippy::from_over_into)]
-    //            impl Into<ReadOnlyDevice> for OldReadOnlyDevice {
-    //                fn into(self) -> ReadOnlyDevice {
-    //                    let mut device_keys = DeviceKeys::new(
-    //                        self.user_id,
-    //                        self.device_id,
-    //                        self.algorithms,
-    //                        self.keys,
-    //                        self.signatures,
-    //                    );
-    //                    device_keys.unsigned.device_display_name =
-    // self.display_name;
-    //
-    //                    ReadOnlyDevice::new(device_keys, self.trust_state)
-    //                }
-    //            }
-    //
-    //            let devices: Vec<ReadOnlyDevice> = self
-    //                .devices
-    //                .iter()
-    //                .map(|d|
-    // serde_json::from_slice(&d?.1).map_err(CryptoStoreError::Serialization))
-    //                .map(|d| {
-    //                    let d: OldReadOnlyDevice = d?;
-    //                    Ok(d.into())
-    //                })
-    //                .collect::<Result<Vec<ReadOnlyDevice>, CryptoStoreError>>()?;
-    //
-    //            self.devices.transaction(move |tree| {
-    //                for device in &devices {
-    //                    let key = device.encode();
-    //                    let device =
-    //
-    // serde_json::to_vec(device).map_err(ConflictableTransactionError::Abort)?;
-    //                    tree.insert(key, device)?;
-    //                }
-    //
-    //                Ok(())
-    //            })?;
-    //        }
-    //
-    //        if version <= 2 {
-    //            // We're treating our own device now differently, we're checking
-    // if            // the keys match to what we have locally, remove the
-    // unchecked            // device and mark our own user as dirty.
-    //            if let Some(pickle) = self.account.get("account".encode())? {
-    //                let pickle = serde_json::from_slice(&pickle)?;
-    //                let account = ReadOnlyAccount::from_pickle(pickle,
-    // self.get_pickle_mode())?;
-    //
-    //                self.devices
-    //                    .remove((account.user_id().as_str(),
-    // account.device_id.as_str()).encode())?;
-    // self.tracked_users.insert(account.user_id().as_str(), &[true as u8])?;
-    //            }
-    //        }
-    //
-    //        self.inner.insert("store_version",
-    // DATABASE_VERSION.to_be_bytes().as_ref())?;        self.inner.flush()?;
-    //
-    //        Ok(())
-    //    }
-    //
-    //    fn open_helper(db: Db, path: Option<PathBuf>, passphrase: Option<&str>) ->
-    // Result<Self> {        let account = db.open_tree("account")?;
-    //        let private_identity = db.open_tree("private_identity")?;
-    //
-    //        let sessions = db.open_tree("session")?;
-    //        let inbound_group_sessions = db.open_tree("inbound_group_sessions")?;
-    //
-    //        let outbound_group_sessions =
-    // db.open_tree("outbound_group_sessions")?;
-    //
-    //        let tracked_users = db.open_tree("tracked_users")?;
-    //        let olm_hashes = db.open_tree("olm_hashes")?;
-    //
-    //        let devices = db.open_tree("devices")?;
-    //        let identities = db.open_tree("identities")?;
-    //
-    //        let outgoing_secret_requests =
-    // db.open_tree("outgoing_secret_requests")?;        let
-    // unsent_secret_requests = db.open_tree("unsent_secret_requests")?;
-    //        let secret_requests_by_info =
-    // db.open_tree("secret_requests_by_info")?;
-    //
-    //        let session_cache = SessionStore::new();
-    //
-    //        let pickle_key = if let Some(passphrase) = passphrase {
-    //            Self::get_or_create_pickle_key(passphrase, &db)?
-    //        } else {
-    //            PickleKey::try_from(DEFAULT_PICKLE.as_bytes().to_vec())
-    //                .expect("Can't create default pickle key")
-    //        };
-    //
-    //        let database = Self {
-    //            account_info: RwLock::new(None).into(),
-    //            path,
-    //            inner: db,
-    //            pickle_key: pickle_key.into(),
-    //            account,
-    //            private_identity,
-    //            sessions,
-    //            session_cache,
-    //            tracked_users_cache: DashSet::new().into(),
-    //            users_for_key_query_cache: DashSet::new().into(),
-    //            inbound_group_sessions,
-    //            outbound_group_sessions,
-    //            outgoing_secret_requests,
-    //            unsent_secret_requests,
-    //            secret_requests_by_info,
-    //            devices,
-    //            tracked_users,
-    //            olm_hashes,
-    //            identities,
-    //        };
-    //
-    //        database.upgrade()?;
-    //
-    //        Ok(database)
-    //    }
 
     async fn get_or_create_store_cipher<Conn>(
         passphrase: &str,
