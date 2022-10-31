@@ -679,7 +679,12 @@ where
         for device in device_changes.new.iter().chain(&device_changes.changed) {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
 
-            pipeline.hset(&redis_key, device.device_id().as_str(), serde_json::to_string(device)?);
+            pipeline.hset(
+                &redis_key,
+                device.device_id().as_str(),
+                String::from_utf8(self.serialize_value(device)?)
+                    .expect("serialize_value returned non-UTF8!"),
+            );
         }
 
         for device in device_changes.deleted {
@@ -690,7 +695,11 @@ where
         for identity in identity_changes.changed.iter().chain(&identity_changes.new) {
             let redis_key = format!("{}identities|{}", self.key_prefix, identity.user_id());
 
-            pipeline.set(&redis_key, serde_json::to_string(identity)?);
+            pipeline.set(
+                &redis_key,
+                String::from_utf8(self.serialize_value(identity)?)
+                    .expect("serialize_value returned non-UTF8!"),
+            );
         }
 
         if let Some(r) = &recovery_key_pickle {
@@ -969,8 +978,8 @@ where
     ) -> Result<Option<ReadOnlyDevice>> {
         let mut connection = self.client.get_async_connection().await?;
         let key = format!("{}devices|{}", self.key_prefix, user_id);
-        let dev: Option<String> = connection.hget(&key, device_id.as_str()).await?;
-        Ok(dev.map(|d| serde_json::from_str(&d)).transpose()?)
+        let dev: Option<Vec<u8>> = connection.hget(&key, device_id.as_str()).await?;
+        Ok(dev.map(|d| self.deserialize_value(&d)).transpose()?)
     }
 
     async fn get_user_devices(
@@ -978,13 +987,13 @@ where
         user_id: &UserId,
     ) -> Result<HashMap<OwnedDeviceId, ReadOnlyDevice>> {
         let mut connection = self.client.get_async_connection().await?;
-        let user_device: HashMap<String, String> =
+        let user_device: HashMap<String, Vec<u8>> =
             connection.hgetall(&format!("{}devices|{}", self.key_prefix, user_id)).await?;
 
         user_device
             .into_iter()
             .map(|(device_id, device_str)| {
-                let d = serde_json::from_str(&device_str)?;
+                let d = self.deserialize_value(&device_str)?;
                 Ok((device_id.into(), d))
             })
             .collect()
@@ -993,8 +1002,8 @@ where
     async fn get_user_identity(&self, user_id: &UserId) -> Result<Option<ReadOnlyUserIdentities>> {
         let mut connection = self.client.get_async_connection().await?;
         let redis_key = format!("{}identities|{}", self.key_prefix, user_id);
-        let identity_string: Option<String> = connection.get(&redis_key).await?;
-        let identity = identity_string.map(|s| serde_json::from_str(&s)).transpose()?;
+        let identity_string: Option<Vec<u8>> = connection.get(&redis_key).await?;
+        let identity = identity_string.map(|s| self.deserialize_value(&s)).transpose()?;
         Ok(identity)
     }
 
