@@ -207,15 +207,6 @@ where
     }
 }
 
-//impl From<TransactionError<serde_json::Error>> for CryptoStoreError {
-//    fn from(e: TransactionError<serde_json::Error>) -> Self {
-//        match e {
-//            TransactionError::Abort(e) => CryptoStoreError::Serialization(e),
-//            TransactionError::Storage(e) => CryptoStoreError::Database(e),
-//        }
-//    }
-//}
-
 impl<C> RedisStore<C>
 where
     C: RedisClientShim,
@@ -528,11 +519,10 @@ where
         let mut connection = self.client.get_async_connection().await?;
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
-        let session_str: Option<String> = connection.hget(&redis_key, room_id.as_str()).await?;
+        let session_vec: Option<Vec<u8>> = connection.hget(&redis_key, room_id.as_str()).await?;
 
-        if let Some(session_str) = session_str {
-            let session: PickledOutboundGroupSession =
-                serde_json::from_str(&session_str).map_err(CryptoStoreError::Serialization)?;
+        if let Some(session_vec) = session_vec {
+            let session: PickledOutboundGroupSession = self.deserialize_value(&session_vec)?;
 
             let unpickled: OutboundGroupSession = OutboundGroupSession::from_pickle(
                 account_info.device_id,
@@ -613,12 +603,20 @@ where
 
         if let Some(i) = &private_identity_pickle {
             let redis_key = format!("{}private_identity", self.key_prefix);
-            pipeline.set(&redis_key, serde_json::to_string(&i)?);
+            pipeline.set(
+                &redis_key,
+                String::from_utf8(self.serialize_value(&i)?)
+                    .expect("Non-UTF8 string from serialize_value"),
+            );
         }
 
         for (key, sessions) in &session_changes {
             let redis_key = format!("{}sessions|{}", self.key_prefix, key);
-            pipeline.set(&redis_key, serde_json::to_string(sessions)?);
+            pipeline.set(
+                &redis_key,
+                String::from_utf8(self.serialize_value(sessions)?)
+                    .expect("Non-UTF8 string from serialize_value"),
+            );
         }
 
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
@@ -636,7 +634,8 @@ where
             pipeline.hset(
                 &redis_key,
                 key.as_str(),
-                serde_json::to_string(outbound_group_sessions)?,
+                String::from_utf8(self.serialize_value(outbound_group_sessions)?)
+                    .expect("serialize_value returned non-UTF-8!"),
             );
         }
 
@@ -661,13 +660,18 @@ where
                 format!("{}outgoing_secret_requests|{}", self.key_prefix, key_request_id);
             if key_request.sent_out {
                 pipeline.hdel(&unsent_secret_requests_key, &key_request_id);
-                pipeline.set(&outgoing_secret_requests_key, serde_json::to_string(&key_request)?);
+                pipeline.set(
+                    &outgoing_secret_requests_key,
+                    String::from_utf8(self.serialize_value(&key_request)?)
+                        .expect("serialize_value returned non-UTF-8!"),
+                );
             } else {
                 pipeline.del(&outgoing_secret_requests_key);
                 pipeline.hset(
                     &unsent_secret_requests_key,
                     &key_request_id,
-                    serde_json::to_string(&key_request)?,
+                    String::from_utf8(self.serialize_value(&key_request)?)
+                        .expect("serialize_value returned non-UTF-8!"),
                 );
             }
         }
@@ -710,12 +714,12 @@ where
     ) -> Result<Option<GossipRequest>> {
         let mut connection = self.client.get_async_connection().await?;
         let redis_key = format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id);
-        let req_string: Option<String> = connection.get(&redis_key).await?;
-        let request = req_string.map(|req_string| serde_json::from_str(&req_string)).transpose()?;
+        let req_vec: Option<Vec<u8>> = connection.get(&redis_key).await?;
+        let request = req_vec.map(|req_vec| self.deserialize_value(&req_vec)).transpose()?;
         let request = if request.is_none() {
             let redis_key = format!("{}unsent_secret_requests", self.key_prefix);
-            let req_string: Option<String> = connection.hget(&redis_key, request_id).await?;
-            req_string.map(|req_string| serde_json::from_str(&req_string)).transpose()?
+            let req_bytes: Option<Vec<u8>> = connection.hget(&redis_key, request_id).await?;
+            req_bytes.map(|req_bytes| self.deserialize_value(&req_bytes)).transpose()?
         } else {
             request
         };
@@ -795,9 +799,9 @@ where
     async fn load_identity(&self) -> Result<Option<PrivateCrossSigningIdentity>> {
         let mut connection = self.client.get_async_connection().await?;
         let key_prefix: String = format!("{}private_identity", self.key_prefix);
-        let i_string: Option<String> = connection.get(&key_prefix).await?;
+        let i_string: Option<Vec<u8>> = connection.get(&key_prefix).await?;
         if let Some(i) = i_string {
-            let pickle = serde_json::from_str(&i)?;
+            let pickle = self.deserialize_value(&i)?;
             Ok(Some(
                 PrivateCrossSigningIdentity::from_pickle(pickle)
                     .await
@@ -819,9 +823,9 @@ where
             let mut connection = self.client.get_async_connection().await.unwrap();
 
             let key = format!("{}sessions|{}", self.key_prefix, sender_key);
-            let sessions_list_as_string: Option<String> = connection.get(&key).await?;
-            let sessions_list: Vec<PickledSession> = match sessions_list_as_string {
-                Some(sessions_list_as_string) => serde_json::from_str(&sessions_list_as_string)?,
+            let sessions_list_as_vec: Option<Vec<u8>> = connection.get(&key).await?;
+            let sessions_list: Vec<PickledSession> = match sessions_list_as_vec {
+                Some(sessions_list_as_vec) => self.deserialize_value(&sessions_list_as_vec)?,
                 _ => Vec::new(),
             };
 
@@ -1030,15 +1034,15 @@ where
     async fn get_unsent_secret_requests(&self) -> Result<Vec<GossipRequest>> {
         let mut connection = self.client.get_async_connection().await.unwrap();
         let redis_key = format!("{}unsent_secret_requests", self.key_prefix);
-        let req_map: HashMap<String, String> = connection.hgetall(&redis_key).await.unwrap();
-        Ok(req_map.iter().map(|(_, req)| serde_json::from_str(&req).unwrap()).collect())
+        let req_map: HashMap<String, Vec<u8>> = connection.hgetall(&redis_key).await.unwrap();
+        Ok(req_map.iter().map(|(_, req)| self.deserialize_value(&req).unwrap()).collect())
     }
 
     async fn delete_outgoing_secret_requests(&self, request_id: &TransactionId) -> Result<()> {
         let mut connection = self.client.get_async_connection().await?;
         let okr_req_id_key =
             format!("{}outgoing_secret_requests|{}", self.key_prefix, request_id.redis_key());
-        let sent_request: Option<String> = connection.get(&okr_req_id_key).await?;
+        let sent_request: Option<Vec<u8>> = connection.get(&okr_req_id_key).await?;
 
         // Wrap the deletes in a Redis transaction
         // TODO: race: if someone updates sent_request before we delete it, we
@@ -1050,7 +1054,7 @@ where
             pipeline.del(&okr_req_id_key);
             let usr_key = format!("{}unsent_secret_requests", self.key_prefix);
             pipeline.hdel(&usr_key, &request_id.redis_key());
-            let sent_request: GossipRequest = serde_json::from_str(&sent_request)?;
+            let sent_request: GossipRequest = self.deserialize_value(&sent_request)?;
             let srbi_info_key = format!(
                 "{}secret_requests_by_info|{}",
                 self.key_prefix,
