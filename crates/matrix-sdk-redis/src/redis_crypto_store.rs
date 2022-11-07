@@ -243,12 +243,7 @@ where
         let mut pipeline = self.client.create_pipe();
 
         for (k, pickle) in pickles {
-            pipeline.hset(
-                &redis_key,
-                &k,
-                String::from_utf8(self.serialize_value(&pickle)?)
-                    .expect("Invalid UTF-8 from serialize_value!"),
-            );
+            pipeline.hset(&redis_key, &k, self.serialize_value(&pickle)?);
         }
 
         pipeline.query_async(&mut connection).await.unwrap();
@@ -396,40 +391,22 @@ where
 
         if let Some(i) = &private_identity_pickle {
             let redis_key = format!("{}private_identity", self.key_prefix);
-            pipeline.set(
-                &redis_key,
-                String::from_utf8(self.serialize_value(&i)?)
-                    .expect("Non-UTF8 string from serialize_value"),
-            );
+            pipeline.set_vec(&redis_key, self.serialize_value(&i)?);
         }
 
         for (key, sessions) in &session_changes {
             let redis_key = format!("{}sessions|{}", self.key_prefix, key);
-            pipeline.set(
-                &redis_key,
-                String::from_utf8(self.serialize_value(sessions)?)
-                    .expect("Non-UTF8 string from serialize_value"),
-            );
+            pipeline.set_vec(&redis_key, self.serialize_value(sessions)?);
         }
 
         let redis_key = format!("{}inbound_group_sessions", self.key_prefix);
         for (key, inbound_group_sessions) in &inbound_session_changes {
-            pipeline.hset(
-                &redis_key,
-                key,
-                String::from_utf8(self.serialize_value(&inbound_group_sessions)?)
-                    .expect("serialize_value returned non-UTF-8!"),
-            );
+            pipeline.hset(&redis_key, key, self.serialize_value(&inbound_group_sessions)?);
         }
 
         let redis_key = format!("{}outbound_session_changes", self.key_prefix);
         for (key, outbound_group_sessions) in &outbound_session_changes {
-            pipeline.hset(
-                &redis_key,
-                key.as_str(),
-                String::from_utf8(self.serialize_value(outbound_group_sessions)?)
-                    .expect("serialize_value returned non-UTF-8!"),
-            );
+            pipeline.hset(&redis_key, key.as_str(), self.serialize_value(outbound_group_sessions)?);
         }
 
         let redis_key = format!("{}olm_hashes", self.key_prefix);
@@ -453,18 +430,14 @@ where
                 format!("{}outgoing_secret_requests|{}", self.key_prefix, key_request_id);
             if key_request.sent_out {
                 pipeline.hdel(&unsent_secret_requests_key, &key_request_id);
-                pipeline.set(
-                    &outgoing_secret_requests_key,
-                    String::from_utf8(self.serialize_value(&key_request)?)
-                        .expect("serialize_value returned non-UTF-8!"),
-                );
+                pipeline
+                    .set_vec(&outgoing_secret_requests_key, self.serialize_value(&key_request)?);
             } else {
                 pipeline.del(&outgoing_secret_requests_key);
                 pipeline.hset(
                     &unsent_secret_requests_key,
                     &key_request_id,
-                    String::from_utf8(self.serialize_value(&key_request)?)
-                        .expect("serialize_value returned non-UTF-8!"),
+                    self.serialize_value(&key_request)?,
                 );
             }
         }
@@ -472,12 +445,7 @@ where
         for device in device_changes.new.iter().chain(&device_changes.changed) {
             let redis_key = format!("{}devices|{}", self.key_prefix, device.user_id());
 
-            pipeline.hset(
-                &redis_key,
-                device.device_id().as_str(),
-                String::from_utf8(self.serialize_value(device)?)
-                    .expect("serialize_value returned non-UTF8!"),
-            );
+            pipeline.hset(&redis_key, device.device_id().as_str(), self.serialize_value(device)?);
         }
 
         for device in device_changes.deleted {
@@ -488,11 +456,7 @@ where
         for identity in identity_changes.changed.iter().chain(&identity_changes.new) {
             let redis_key = format!("{}identities|{}", self.key_prefix, identity.user_id());
 
-            pipeline.set(
-                &redis_key,
-                String::from_utf8(self.serialize_value(identity)?)
-                    .expect("serialize_value returned non-UTF8!"),
-            );
+            pipeline.set_vec(&redis_key, self.serialize_value(identity)?);
         }
 
         if let Some(r) = &recovery_key_pickle {
@@ -553,8 +517,7 @@ where
             let _: () = pipeline.hset(
                 &format!("{}tracked_users", self.key_prefix),
                 user.user_id.as_str(),
-                String::from_utf8(self.serialize_value(&user)?)
-                    .map_err(|e| CryptoStoreError::Backend(Box::new(e)))?,
+                self.serialize_value(&user)?,
             );
         }
 

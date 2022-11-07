@@ -63,7 +63,7 @@ pub trait RedisPipelineShim: Send + Sync {
     fn set(&mut self, key: &str, value: String);
     fn set_vec(&mut self, key: &str, value: Vec<u8>);
     fn del(&mut self, key: &str);
-    fn hset(&mut self, key: &str, field: &str, value: String);
+    fn hset(&mut self, key: &str, field: &str, value: Vec<u8>);
     fn hdel(&mut self, key: &str, field: &str);
     fn sadd(&mut self, key: &str, value: String);
 

@@ -155,7 +155,7 @@ impl RedisPipelineShim for RealRedisPipeline {
         self.pipeline.del(key);
     }
 
-    fn hset(&mut self, key: &str, field: &str, value: String) {
+    fn hset(&mut self, key: &str, field: &str, value: Vec<u8>) {
         self.pipeline.hset(key, field, value);
     }
 

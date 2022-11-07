@@ -225,7 +225,7 @@ impl RedisClientShim for FakeRedisClient {
 enum PipelineCommand {
     Del(String),
     Hdel(String, String),
-    Hset(String, String, String),
+    Hset(String, String, Vec<u8>),
     Sadd(String, String),
     Set(String, String),
     SetVec(String, Vec<u8>),
@@ -257,7 +257,7 @@ impl RedisPipelineShim for FakeRedisPipeline {
         self.cmds.push(PipelineCommand::Del(String::from(key)));
     }
 
-    fn hset(&mut self, key: &str, field: &str, value: String) {
+    fn hset(&mut self, key: &str, field: &str, value: Vec<u8>) {
         self.cmds.push(PipelineCommand::Hset(String::from(key), String::from(field), value));
     }
 
@@ -275,7 +275,7 @@ impl RedisPipelineShim for FakeRedisPipeline {
                 PipelineCommand::Del(key) => connection.del(key).await?,
                 PipelineCommand::Hdel(key, field) => connection.hdel(key, field).await?,
                 PipelineCommand::Hset(key, field, value) => {
-                    connection.hset(key, field, value.clone().into_bytes()).await?
+                    connection.hset(key, field, value.clone()).await?
                 }
                 PipelineCommand::Sadd(key, value) => {
                     connection.sadd(&key, value.to_owned()).await?
