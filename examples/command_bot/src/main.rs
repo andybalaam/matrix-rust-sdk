@@ -52,7 +52,7 @@ async fn login_and_sync(
     {
         println!("Creating a Redis store on 127.0.0.1");
         let redis_url = "redis://127.0.0.1/";
-        let redis_prefix = "command_bot";
+        let redis_prefix = "party_bot";
         client_builder = client_builder.redis_store(redis_url, None, redis_prefix).await?;
     }
 
